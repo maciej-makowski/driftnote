@@ -3505,3 +3505,847 @@ git commit -m "feat(repository): ingested_messages + pending_prompts + disk_stat
 - [ ] 4 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off:** Chunks 4 and 5 (mail transport) can run in parallel from the end of Chunk 3 since neither depends on the other. Chunk 6 (ingestion pipeline) needs both.
+
+---
+
+## Chunk 5: Mail transport (IMAP + SMTP via GreenMail)
+
+**Outcome of this chunk:** A `mail/` module that can SMTP-send (subject, body_text, optional body_html, attachments, optional `In-Reply-To`) and IMAP-poll (fetch UNSEEN messages, copy to Processed folder, mark deleted, expunge). Same code path runs against Gmail in prod and GreenMail in dev/CI; transport selection is purely configuration. Integration tests use `testcontainers-python` to spin up GreenMail per test session.
+
+**Adds dependencies (already in pyproject):** `aioimaplib`, `aiosmtplib`, `testcontainers`. No new deps.
+
+### Task 5.1: GreenMail test fixture
+
+**Files:**
+- Modify: `tests/conftest.py`
+- Create: `tests/integration/conftest.py`
+
+- [ ] **Step 1: Extend `tests/conftest.py` with shared mail-server fixture types**
+
+Replace `tests/conftest.py` with:
+
+```python
+"""Shared pytest fixtures for Driftnote tests."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+
+@dataclass(frozen=True)
+class MailServer:
+    """Connection details for a running mail server (GreenMail in tests)."""
+
+    host: str
+    smtp_port: int
+    imap_port: int
+    user: str
+    password: str
+    address: str
+
+
+@pytest.fixture
+def tmp_data_dir(tmp_path: Path) -> Iterator[Path]:
+    """A temp data directory matching the prod layout."""
+    data = tmp_path / "data"
+    (data / "entries").mkdir(parents=True)
+    yield data
+```
+
+- [ ] **Step 2: Create `tests/integration/conftest.py` with the GreenMail container fixture**
+
+```python
+"""Integration-test fixtures: a session-scoped GreenMail container."""
+
+from __future__ import annotations
+
+import socket
+import time
+from collections.abc import Iterator
+
+import pytest
+from testcontainers.core.container import DockerContainer
+
+from tests.conftest import MailServer
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.5)
+    raise TimeoutError(f"port {host}:{port} not reachable within {timeout}s")
+
+
+@pytest.fixture(scope="session")
+def mail_server() -> Iterator[MailServer]:
+    user = "you"
+    password = "apppwd"
+    address = "you@example.com"
+    container = (
+        DockerContainer("greenmail/standalone:2.1.4")
+        .with_env(
+            "GREENMAIL_OPTS",
+            (
+                "-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap "
+                f"-Dgreenmail.users={user}:{password}:{address} "
+                "-Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled"
+            ),
+        )
+        .with_exposed_ports(3025, 3143, 8080)
+    )
+    container.start()
+    try:
+        host = container.get_container_host_ip()
+        smtp_port = int(container.get_exposed_port(3025))
+        imap_port = int(container.get_exposed_port(3143))
+        _wait_for_port(host, smtp_port)
+        _wait_for_port(host, imap_port)
+        yield MailServer(
+            host=host,
+            smtp_port=smtp_port,
+            imap_port=imap_port,
+            user=user,
+            password=password,
+            address=address,
+        )
+    finally:
+        container.stop()
+```
+
+- [ ] **Step 3: Verify the fixture starts a real container**
+
+Add a smoke test `tests/integration/test_mail_fixture_smoke.py`:
+
+```python
+"""Smoke test that the GreenMail container fixture comes up."""
+
+from __future__ import annotations
+
+import socket
+
+from tests.conftest import MailServer
+
+
+def test_mail_server_ports_reachable(mail_server: MailServer) -> None:
+    for port in (mail_server.smtp_port, mail_server.imap_port):
+        with socket.create_connection((mail_server.host, port), timeout=3):
+            pass
+```
+
+Run: `uv run pytest tests/integration/test_mail_fixture_smoke.py -v`
+Expected: 1 passed (takes ~3-5s for the container to come up).
+
+- [ ] **Step 4: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add tests/conftest.py tests/integration/conftest.py tests/integration/test_mail_fixture_smoke.py
+git commit -m "test: GreenMail testcontainers fixture for integration tests"
+```
+
+---
+
+### Task 5.2: `mail/transport.py` — connection params
+
+**Files:**
+- Create: `src/driftnote/mail/__init__.py`
+- Create: `src/driftnote/mail/transport.py`
+- Create: `tests/unit/test_mail_transport.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for mail transport config translation."""
+
+from __future__ import annotations
+
+from driftnote.config import Config, EmailConfig, ScheduleConfig, PromptConfig, ParsingConfig, DigestsConfig, BackupConfig, DiskConfig, Secrets
+from driftnote.mail.transport import ImapTransport, SmtpTransport, transports_from_config
+
+from pydantic import SecretStr
+
+
+def _config(**email_overrides) -> Config:
+    email = EmailConfig(
+        imap_folder="Driftnote/Inbox",
+        imap_processed_folder="Driftnote/Processed",
+        recipient="you@gmail.com",
+        sender_name="Driftnote",
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_tls=True,
+        smtp_host="smtp.gmail.com",
+        smtp_port=587,
+        smtp_tls=False,
+        smtp_starttls=True,
+    )
+    return Config(
+        schedule=ScheduleConfig(
+            daily_prompt="0 21 * * *",
+            weekly_digest="0 8 * * 1",
+            monthly_digest="0 8 1 * *",
+            yearly_digest="0 8 1 1 *",
+            imap_poll="*/5 * * * *",
+            timezone="Europe/London",
+        ),
+        email=email.model_copy(update=email_overrides),
+        prompt=PromptConfig(subject_template="[Driftnote] {date}", body_template="t.j2"),
+        parsing=ParsingConfig(mood_regex=r"^Mood:\s*(\S+)", tag_regex=r"#(\w+)", max_photos=4, max_videos=2),
+        digests=DigestsConfig(weekly_enabled=True, monthly_enabled=True, yearly_enabled=True),
+        backup=BackupConfig(retain_months=12, encrypt=False, age_key_path=""),
+        disk=DiskConfig(warn_percent=80, alert_percent=95, check_cron="0 */6 * * *", data_path="/var/driftnote/data"),
+        secrets=Secrets(
+            gmail_user="you@gmail.com",
+            gmail_app_password=SecretStr("p"),
+            cf_access_aud="aud",
+            cf_team_domain="t.example.com",
+        ),
+    )
+
+
+def test_transports_from_config_prod() -> None:
+    cfg = _config()
+    imap, smtp = transports_from_config(cfg)
+    assert imap == ImapTransport(
+        host="imap.gmail.com",
+        port=993,
+        tls=True,
+        username="you@gmail.com",
+        password="p",
+        inbox_folder="Driftnote/Inbox",
+        processed_folder="Driftnote/Processed",
+    )
+    assert smtp == SmtpTransport(
+        host="smtp.gmail.com",
+        port=587,
+        tls=False,
+        starttls=True,
+        username="you@gmail.com",
+        password="p",
+        sender_address="you@gmail.com",
+        sender_name="Driftnote",
+    )
+
+
+def test_transports_from_config_dev_with_overrides() -> None:
+    cfg = _config(imap_host="mail", imap_port=3143, imap_tls=False, smtp_host="mail", smtp_port=3025, smtp_starttls=False)
+    imap, smtp = transports_from_config(cfg)
+    assert imap.host == "mail"
+    assert imap.tls is False
+    assert smtp.starttls is False
+    assert smtp.port == 3025
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_mail_transport.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/mail/__init__.py`** (empty)
+
+```python
+"""Mail transport: SMTP send + IMAP poll."""
+```
+
+- [ ] **Step 4: Implement `src/driftnote/mail/transport.py`**
+
+```python
+"""Connection parameters for IMAP and SMTP transports.
+
+Translated from `Config` once at app startup; passed to send/poll functions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from driftnote.config import Config
+
+
+@dataclass(frozen=True)
+class ImapTransport:
+    host: str
+    port: int
+    tls: bool
+    username: str
+    password: str
+    inbox_folder: str
+    processed_folder: str
+
+
+@dataclass(frozen=True)
+class SmtpTransport:
+    host: str
+    port: int
+    tls: bool         # implicit TLS (SMTPS, port 465)
+    starttls: bool    # opportunistic STARTTLS (port 587)
+    username: str
+    password: str
+    sender_address: str
+    sender_name: str
+
+
+def transports_from_config(cfg: Config) -> tuple[ImapTransport, SmtpTransport]:
+    imap = ImapTransport(
+        host=cfg.email.imap_host,
+        port=cfg.email.imap_port,
+        tls=cfg.email.imap_tls,
+        username=cfg.secrets.gmail_user,
+        password=cfg.secrets.gmail_app_password.get_secret_value(),
+        inbox_folder=cfg.email.imap_folder,
+        processed_folder=cfg.email.imap_processed_folder,
+    )
+    smtp = SmtpTransport(
+        host=cfg.email.smtp_host,
+        port=cfg.email.smtp_port,
+        tls=cfg.email.smtp_tls,
+        starttls=cfg.email.smtp_starttls,
+        username=cfg.secrets.gmail_user,
+        password=cfg.secrets.gmail_app_password.get_secret_value(),
+        sender_address=cfg.secrets.gmail_user,
+        sender_name=cfg.email.sender_name,
+    )
+    return imap, smtp
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_mail_transport.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/mail/__init__.py src/driftnote/mail/transport.py tests/unit/test_mail_transport.py
+git commit -m "feat(mail): immutable transport dataclasses derived from config"
+```
+
+---
+
+### Task 5.3: `mail/smtp.py` — async SMTP send
+
+**Files:**
+- Create: `src/driftnote/mail/smtp.py`
+- Create: `tests/integration/test_mail_smtp.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Integration test: SMTP send via GreenMail."""
+
+from __future__ import annotations
+
+import asyncio
+import imaplib
+
+import pytest
+
+from driftnote.mail.smtp import Attachment, send_email
+from driftnote.mail.transport import SmtpTransport
+from tests.conftest import MailServer
+
+
+def _smtp(mail_server: MailServer) -> SmtpTransport:
+    return SmtpTransport(
+        host=mail_server.host,
+        port=mail_server.smtp_port,
+        tls=False,
+        starttls=False,
+        username=mail_server.user,
+        password=mail_server.password,
+        sender_address=mail_server.address,
+        sender_name="Driftnote",
+    )
+
+
+def _fetch_via_imap(mail_server: MailServer) -> bytes:
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.select("INBOX")
+    typ, data = mb.search(None, "ALL")
+    assert typ == "OK"
+    ids = data[0].split()
+    assert ids, "no message in INBOX"
+    typ, msg_data = mb.fetch(ids[-1], "(RFC822)")
+    assert typ == "OK"
+    raw = msg_data[0][1]
+    mb.logout()
+    return raw
+
+
+def test_send_plain_email(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)
+    msg_id = asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="hi",
+            body_text="hello there",
+        )
+    )
+    assert msg_id.startswith("<") and msg_id.endswith(">")
+    raw = _fetch_via_imap(mail_server)
+    assert b"Subject: hi" in raw
+    assert b"hello there" in raw
+    assert msg_id.encode() in raw
+
+
+def test_send_with_in_reply_to(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="re: weekly",
+            body_text="thread reply",
+            in_reply_to="<original-prompt-id@driftnote>",
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"In-Reply-To: <original-prompt-id@driftnote>" in raw
+    assert b"References: <original-prompt-id@driftnote>" in raw
+
+
+def test_send_with_html_alternative(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="alt",
+            body_text="plain version",
+            body_html="<p>HTML version</p>",
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"multipart/alternative" in raw
+    assert b"plain version" in raw
+    assert b"<p>HTML version</p>" in raw
+
+
+def test_send_with_attachment(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="with photo",
+            body_text="see attached",
+            attachments=[Attachment(filename="photo.jpg", content=b"\xff\xd8\xffJPEG-bytes", mime_type="image/jpeg")],
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"photo.jpg" in raw
+    assert b"image/jpeg" in raw
+
+
+def test_send_with_inline_image_cid(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="cid",
+            body_text="see body",
+            body_html='<img src="cid:photo1@driftnote">',
+            attachments=[
+                Attachment(
+                    filename="photo.jpg",
+                    content=b"jpegbytes",
+                    mime_type="image/jpeg",
+                    content_id="<photo1@driftnote>",
+                    inline=True,
+                )
+            ],
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"Content-ID: <photo1@driftnote>" in raw
+    assert b"Content-Disposition: inline" in raw
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_mail_smtp.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/mail/smtp.py`**
+
+```python
+"""Async SMTP send. Builds a MIME message and dispatches via aiosmtplib.
+
+Returns the outgoing Message-ID so callers can persist it (e.g. as the
+prompt's anchor for matching incoming replies).
+"""
+
+from __future__ import annotations
+
+import secrets
+import time
+from dataclasses import dataclass, field
+from email.message import EmailMessage
+from email.utils import formataddr, formatdate, make_msgid
+
+import aiosmtplib
+
+from driftnote.mail.transport import SmtpTransport
+
+
+@dataclass(frozen=True)
+class Attachment:
+    filename: str
+    content: bytes
+    mime_type: str            # e.g. "image/jpeg"
+    content_id: str | None = None    # set + inline=True for CID-referenced inline images
+    inline: bool = False
+
+
+async def send_email(
+    transport: SmtpTransport,
+    *,
+    recipient: str,
+    subject: str,
+    body_text: str,
+    body_html: str | None = None,
+    attachments: list[Attachment] | None = None,
+    in_reply_to: str | None = None,
+) -> str:
+    """Send an email and return the generated Message-ID (including angle brackets)."""
+    msg = EmailMessage()
+    msg["From"] = formataddr((transport.sender_name, transport.sender_address))
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(time.time(), localtime=True)
+    domain = transport.sender_address.split("@", 1)[-1] or "driftnote"
+    message_id = make_msgid(idstring=secrets.token_hex(8), domain=domain)
+    msg["Message-ID"] = message_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+
+    msg.set_content(body_text)
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
+
+    for att in attachments or []:
+        maintype, _, subtype = att.mime_type.partition("/")
+        if not subtype:
+            maintype, subtype = "application", "octet-stream"
+        kwargs = {
+            "maintype": maintype,
+            "subtype": subtype,
+            "filename": att.filename,
+        }
+        if att.inline and att.content_id:
+            kwargs["disposition"] = "inline"
+            kwargs["cid"] = att.content_id
+        msg.add_attachment(att.content, **kwargs)
+
+    await aiosmtplib.send(
+        msg,
+        hostname=transport.host,
+        port=transport.port,
+        use_tls=transport.tls,
+        start_tls=transport.starttls,
+        username=transport.username if transport.username else None,
+        password=transport.password if transport.password else None,
+    )
+    return message_id
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_mail_smtp.py -v`
+Expected: 5 passed (~3s with container reuse).
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/mail/smtp.py tests/integration/test_mail_smtp.py
+git commit -m "feat(mail): async SMTP send with HTML alt + attachments + inline CIDs"
+```
+
+---
+
+### Task 5.4: `mail/imap.py` — async IMAP poll + move
+
+**Files:**
+- Create: `src/driftnote/mail/imap.py`
+- Create: `tests/integration/test_mail_imap.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Integration test: IMAP poll + move via GreenMail."""
+
+from __future__ import annotations
+
+import asyncio
+import imaplib
+from email.message import EmailMessage
+from email.utils import make_msgid
+
+import pytest
+
+from driftnote.mail.imap import RawMessage, move_to_processed, poll_unseen
+from driftnote.mail.transport import ImapTransport
+from tests.conftest import MailServer
+
+
+def _imap(mail_server: MailServer, *, inbox: str = "INBOX", processed: str = "INBOX.Processed") -> ImapTransport:
+    return ImapTransport(
+        host=mail_server.host,
+        port=mail_server.imap_port,
+        tls=False,
+        username=mail_server.user,
+        password=mail_server.password,
+        inbox_folder=inbox,
+        processed_folder=processed,
+    )
+
+
+def _drop_into_inbox(mail_server: MailServer, *, subject: str, message_id: str | None = None) -> str:
+    """Use raw IMAP APPEND to inject a test message into the user's INBOX."""
+    msg = EmailMessage()
+    msg["From"] = mail_server.address
+    msg["To"] = mail_server.address
+    msg["Subject"] = subject
+    if message_id is None:
+        message_id = make_msgid(domain="driftnote")
+    msg["Message-ID"] = message_id
+    msg.set_content("body of " + subject)
+
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.append("INBOX", "", imaplib.Time2Internaldate(0), msg.as_bytes())
+    mb.logout()
+    return message_id
+
+
+def _list_inbox_subjects(mail_server: MailServer, folder: str = "INBOX") -> list[bytes]:
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.select(folder)
+    typ, data = mb.search(None, "ALL")
+    out: list[bytes] = []
+    for ident in data[0].split():
+        typ, hdr = mb.fetch(ident, "(BODY[HEADER.FIELDS (SUBJECT)])")
+        out.append(hdr[0][1])
+    mb.logout()
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _clean_mailbox(mail_server: MailServer):
+    """Empty INBOX + Processed before each test so order-dependent ones don't leak state."""
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    for folder in ("INBOX", "INBOX.Processed"):
+        try:
+            mb.select(folder)
+            mb.store("1:*", "+FLAGS", r"\Deleted")
+            mb.expunge()
+        except Exception:
+            pass
+    # Ensure Processed exists (GreenMail auto-creates on append, but explicit create is safer).
+    try:
+        mb.create("INBOX.Processed")
+    except Exception:
+        pass
+    mb.logout()
+
+
+def test_poll_unseen_returns_raw_messages(mail_server: MailServer) -> None:
+    msg_id = _drop_into_inbox(mail_server, subject="hello driftnote")
+    transport = _imap(mail_server)
+    messages: list[RawMessage] = asyncio.run(_collect(transport))
+    assert len(messages) == 1
+    assert messages[0].message_id == msg_id
+    assert b"Subject: hello driftnote" in messages[0].raw_bytes
+
+
+def test_poll_skips_already_seen_messages(mail_server: MailServer) -> None:
+    _drop_into_inbox(mail_server, subject="first")
+    transport = _imap(mail_server)
+    asyncio.run(_collect(transport))  # first poll marks them \Seen
+    second = asyncio.run(_collect(transport))
+    assert second == []
+
+
+def test_move_to_processed(mail_server: MailServer) -> None:
+    msg_id = _drop_into_inbox(mail_server, subject="movable")
+    transport = _imap(mail_server)
+    asyncio.run(move_to_processed(transport, message_id=msg_id))
+    inbox = _list_inbox_subjects(mail_server, "INBOX")
+    processed = _list_inbox_subjects(mail_server, "INBOX.Processed")
+    assert all(b"movable" not in s for s in inbox)
+    assert any(b"movable" in s for s in processed)
+
+
+async def _collect(transport: ImapTransport) -> list[RawMessage]:
+    out: list[RawMessage] = []
+    async for msg in poll_unseen(transport):
+        out.append(msg)
+    return out
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_mail_imap.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/mail/imap.py`**
+
+```python
+"""Async IMAP poll + move helpers built on aioimaplib.
+
+`poll_unseen` is an async generator yielding `RawMessage` for each UNSEEN
+message in `transport.inbox_folder`. After the consumer has persisted the
+message it should call `move_to_processed(transport, message_id=...)` to
+copy the message to the Processed folder, mark it deleted in Inbox, and
+expunge.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from email.parser import BytesParser
+from email.policy import default as default_policy
+
+import aioimaplib
+
+from driftnote.mail.transport import ImapTransport
+
+
+@dataclass(frozen=True)
+class RawMessage:
+    """A fetched UNSEEN message: original bytes + parsed Message-ID."""
+
+    message_id: str
+    raw_bytes: bytes
+
+
+async def _connect(transport: ImapTransport) -> aioimaplib.IMAP4 | aioimaplib.IMAP4_SSL:
+    if transport.tls:
+        client: aioimaplib.IMAP4 | aioimaplib.IMAP4_SSL = aioimaplib.IMAP4_SSL(host=transport.host, port=transport.port)
+    else:
+        client = aioimaplib.IMAP4(host=transport.host, port=transport.port)
+    await client.wait_hello_from_server()
+    await client.login(transport.username, transport.password)
+    return client
+
+
+async def poll_unseen(transport: ImapTransport) -> AsyncIterator[RawMessage]:
+    """Yield each UNSEEN message in transport.inbox_folder. Marks them \\Seen."""
+    client = await _connect(transport)
+    try:
+        await client.select(transport.inbox_folder)
+        result, data = await client.search("UNSEEN")
+        if result != "OK" or not data or not data[0]:
+            return
+        ids = data[0].split()
+        for ident in ids:
+            ident_str = ident.decode("ascii")
+            fetch_result, fetch_data = await client.fetch(ident_str, "(RFC822)")
+            if fetch_result != "OK":
+                continue
+            raw = _extract_rfc822(fetch_data)
+            if raw is None:
+                continue
+            parsed = BytesParser(policy=default_policy).parsebytes(raw)
+            message_id = (parsed["Message-ID"] or "").strip()
+            if not message_id:
+                continue
+            yield RawMessage(message_id=message_id, raw_bytes=raw)
+    finally:
+        await client.logout()
+
+
+async def move_to_processed(transport: ImapTransport, *, message_id: str) -> None:
+    """Copy the message to Processed, mark deleted in Inbox, expunge.
+
+    Raises if the message cannot be located by Message-ID.
+    """
+    client = await _connect(transport)
+    try:
+        # Ensure the destination folder exists. GreenMail and Gmail both accept
+        # CREATE on an existing folder as a no-op (Gmail returns NO; we ignore it).
+        try:
+            await client.create(transport.processed_folder)
+        except Exception:
+            pass
+        await client.select(transport.inbox_folder)
+        # IMAP requires HEADER values containing brackets/@/spaces to be
+        # IMAP-quoted. Wrap the Message-ID in double quotes.
+        quoted = f'"{message_id}"'
+        result, data = await client.search("HEADER", "Message-ID", quoted)
+        if result != "OK" or not data or not data[0]:
+            raise RuntimeError(f"message {message_id} not found in {transport.inbox_folder}")
+        ident = data[0].split()[0].decode("ascii")
+        copy_result, _ = await client.copy(ident, transport.processed_folder)
+        if copy_result != "OK":
+            raise RuntimeError(f"COPY failed: {copy_result}")
+        await client.store(ident, "+FLAGS", r"(\Deleted)")
+        await client.expunge()
+    finally:
+        try:
+            await client.logout()
+        except Exception:
+            pass
+
+
+def _extract_rfc822(fetch_data: list) -> bytes | None:
+    """Pull the RFC822 body bytes out of an aioimaplib FETCH response.
+
+    aioimaplib's FETCH returns a list shaped roughly:
+        [b'<seqnum> (RFC822 {<size>}', b'<rfc822-bytes>', b')', b'FETCH completed.']
+
+    Anchor on the literal-size prelude (`...{N}`): the body is the immediately
+    following bytes chunk. Robust against trailing status lines or multiple
+    FETCH responses appearing in the same `data` list.
+    """
+    for i, chunk in enumerate(fetch_data):
+        if not isinstance(chunk, (bytes, bytearray)):
+            continue
+        stripped = chunk.rstrip()
+        if stripped.endswith(b"}") and b"{" in stripped:
+            if i + 1 < len(fetch_data) and isinstance(fetch_data[i + 1], (bytes, bytearray)):
+                return bytes(fetch_data[i + 1])
+    return None
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_mail_imap.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/mail/imap.py tests/integration/test_mail_imap.py
+git commit -m "feat(mail): async IMAP poll + move-to-Processed helpers"
+```
+
+---
+
+### Chunk 5 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–5 tests pass: `uv run pytest -v` (≥58 tests).
+- [ ] Integration tests with GreenMail run from a clean checkout (no externally-managed services required).
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] 4 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** Chunk 6 (ingestion pipeline) needs Chunks 3, 4, and 5; with all three landed, ingestion can be implemented next.
