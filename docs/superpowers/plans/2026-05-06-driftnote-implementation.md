@@ -30,18 +30,19 @@
 |---|---|---|---|
 | 1 | Foundation A: skeleton, container, config, logging | — | dev compose runs GreenMail; config + logging modules |
 | 2 | Foundation B: models, db, minimal app, CI | 1 | bootable container with `/healthz`; CI green |
-| 3 | Filesystem + Repository | 2 | entry on disk + indexed in SQLite |
-| 4 | Mail transport (IMAP + SMTP via GreenMail) | 2 | can send/receive via GreenMail |
-| 5 | Ingestion pipeline | 3, 4 | end-to-end: `.eml` in → entry on disk + DB |
-| 6 | Scheduler, jobs, alerts | 5 | scheduled prompts/polls/disk-checks/alerts run |
-| 7 | Digest rendering | 3 | digest HTML rendered for fixed inputs |
-| 8 | Web layer | 3, 7 | browse/edit/admin UI works locally |
-| 9 | CLI + app composition | 5, 6, 7, 8 | full app boots, CLI commands work |
-| 10 | Deployment, CI image build, docs | 9 | container in GHCR, README, runbook, quadlet |
+| 3 | Filesystem (paths, markdown_io, locks) | 2 | entry.md round-trips via property tests |
+| 4 | Repository | 2 | full SQL access surface, no ORM leaks |
+| 5 | Mail transport (IMAP + SMTP via GreenMail) | 2 | can send/receive via GreenMail |
+| 6 | Ingestion pipeline | 3, 4, 5 | end-to-end: `.eml` in → entry on disk + DB |
+| 7 | Scheduler, jobs, alerts | 6 | scheduled prompts/polls/disk-checks/alerts run |
+| 8 | Digest rendering | 4 | digest HTML rendered for fixed inputs |
+| 9 | Web layer | 3, 4, 8 | browse/edit/admin UI works locally |
+| 10 | CLI + app composition | 6, 7, 8, 9 | full app boots, CLI commands work |
+| 11 | Deployment, CI image build, docs | 10 | container in GHCR, README, runbook, quadlet |
 
 **Parallelism opportunities for executors using `subagent-driven-development`:**
-- After Chunk 2 lands on `master`: Chunks 3 and 4 can run in parallel worktrees.
-- After Chunk 5 lands: Chunks 6, 7, and 8 can run in parallel worktrees.
+- After Chunk 2 lands on `master`: Chunks 3, 4, and 5 can run in parallel worktrees.
+- After Chunk 6 lands: Chunks 7, 8, and 9 can run in parallel worktrees.
 - All other chunks have linear dependencies and should run in sequence.
 
 ---
@@ -1851,3 +1852,1656 @@ git commit -m "ci: pre-commit hooks and GitHub Actions for lint/types/tests"
 - [ ] Git history contains 4 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off to subsequent chunks:** Foundation is complete. Chunks 3 (filesystem + repository) and 4 (mail transport) can now be developed in parallel worktrees.
+
+---
+
+## Chunk 3: Filesystem (paths, markdown_io, locks)
+
+**Outcome of this chunk:** A clean `filesystem/` module that knows how to compute paths, read/write `entry.md` (YAML frontmatter + body) atomically, and serialize per-date access via `fcntl.flock`. After this chunk Chunk 6 (ingestion) — together with Chunk 4 (repository) and Chunk 5 (mail transport) — can write entries to disk.
+
+**Adds dependencies:** `pyyaml` (for YAML frontmatter; tomllib is stdlib but YAML is not).
+
+### Task 3.1: Add YAML dep + `filesystem/layout.py`
+
+**Files:**
+- Modify: `pyproject.toml` (add `pyyaml`, `types-pyyaml`)
+- Create: `src/driftnote/filesystem/__init__.py`
+- Create: `src/driftnote/filesystem/layout.py`
+- Create: `tests/unit/test_filesystem_layout.py`
+
+- [ ] **Step 1: Add `pyyaml` to project dependencies and `types-pyyaml` to dev**
+
+In `pyproject.toml`, add `"pyyaml>=6.0",` to `[project].dependencies`. Add `"types-pyyaml"` to `[dependency-groups].dev`. Run `uv sync` and commit `uv.lock` along with the change at the end of this task.
+
+- [ ] **Step 2: Write failing test for path layout**
+
+Create `tests/unit/test_filesystem_layout.py`:
+
+```python
+"""Tests for filesystem path layout helpers."""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from driftnote.filesystem.layout import (
+    EntryPaths,
+    entry_paths_for,
+    parse_eml_received_at,
+    raw_eml_filename,
+)
+
+
+def test_entry_paths_for_date(tmp_path: Path) -> None:
+    paths = entry_paths_for(tmp_path, date(2026, 5, 6))
+    assert isinstance(paths, EntryPaths)
+    assert paths.dir == tmp_path / "entries" / "2026" / "05" / "06"
+    assert paths.entry_md == paths.dir / "entry.md"
+    assert paths.raw_dir == paths.dir / "raw"
+    assert paths.originals_dir == paths.dir / "originals"
+    assert paths.web_dir == paths.dir / "web"
+    assert paths.thumbs_dir == paths.dir / "thumbs"
+
+
+def test_raw_eml_filename_format() -> None:
+    # 21:30:15 UTC on 2026-05-06
+    from datetime import datetime, timezone
+    received = datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc)
+    name = raw_eml_filename(received)
+    assert name == "2026-05-06T21-30-15Z.eml"
+
+
+def test_raw_eml_filename_is_filesystem_safe() -> None:
+    from datetime import datetime, timezone
+    name = raw_eml_filename(datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc))
+    forbidden = set(":/\\<>|?*")
+    assert not (set(name) & forbidden)
+
+
+def test_parse_eml_received_at_round_trip() -> None:
+    from datetime import datetime, timezone
+    original = datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc)
+    name = raw_eml_filename(original)
+    parsed = parse_eml_received_at(name)
+    assert parsed == original
+
+
+def test_parse_eml_received_at_rejects_bad_input() -> None:
+    with pytest.raises(ValueError):
+        parse_eml_received_at("not-a-date.eml")
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_filesystem_layout.py -v`
+Expected: FAIL with import error.
+
+- [ ] **Step 4: Implement `src/driftnote/filesystem/__init__.py`** (empty package marker)
+
+```python
+"""Filesystem layer: paths, markdown I/O, locks."""
+```
+
+- [ ] **Step 5: Implement `src/driftnote/filesystem/layout.py`**
+
+```python
+"""Path layout helpers for the entries tree.
+
+Single source of truth for where things live on disk so the rest of the code
+never hard-codes path arithmetic.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+_RAW_FILENAME_FMT = "%Y-%m-%dT%H-%M-%SZ"
+
+
+@dataclass(frozen=True)
+class EntryPaths:
+    """All filesystem paths for one day's entry."""
+
+    dir: Path
+    entry_md: Path
+    raw_dir: Path
+    originals_dir: Path
+    web_dir: Path
+    thumbs_dir: Path
+
+
+def entry_paths_for(data_root: Path, d: date) -> EntryPaths:
+    """Compute (without creating) the path bundle for a given date.
+
+    `data_root` is the parent of `entries/` (i.e. typically `/var/driftnote/data`).
+    """
+    base = data_root / "entries" / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}"
+    return EntryPaths(
+        dir=base,
+        entry_md=base / "entry.md",
+        raw_dir=base / "raw",
+        originals_dir=base / "originals",
+        web_dir=base / "web",
+        thumbs_dir=base / "thumbs",
+    )
+
+
+def raw_eml_filename(received_at: datetime) -> str:
+    """Filesystem-safe filename for a raw .eml message keyed on its received-at UTC time."""
+    if received_at.tzinfo is None:
+        raise ValueError("received_at must be timezone-aware (use UTC)")
+    utc = received_at.astimezone(timezone.utc).replace(microsecond=0)
+    return utc.strftime(_RAW_FILENAME_FMT) + ".eml"
+
+
+def parse_eml_received_at(filename: str) -> datetime:
+    """Inverse of raw_eml_filename. Raises ValueError if the name doesn't fit."""
+    if not filename.endswith(".eml"):
+        raise ValueError(f"not an .eml filename: {filename!r}")
+    stem = filename[:-len(".eml")]
+    try:
+        dt = datetime.strptime(stem, _RAW_FILENAME_FMT)
+    except ValueError as exc:
+        raise ValueError(f"cannot parse received-at from {filename!r}: {exc}") from exc
+    return dt.replace(tzinfo=timezone.utc)
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_filesystem_layout.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 7: Lint + typecheck + commit**
+
+Run: `uv run ruff check src tests && uv run mypy`
+Expected: clean.
+
+```bash
+git add pyproject.toml uv.lock src/driftnote/filesystem/ tests/unit/test_filesystem_layout.py
+git commit -m "feat(filesystem): path layout helpers and raw .eml filename codec"
+```
+
+---
+
+### Task 3.2: `filesystem/markdown_io.py`
+
+**Files:**
+- Create: `src/driftnote/filesystem/markdown_io.py`
+- Create: `tests/unit/test_filesystem_markdown_io.py`
+
+- [ ] **Step 1: Write failing tests**
+
+`tests/unit/test_filesystem_markdown_io.py`:
+
+```python
+"""Tests for entry.md read/write — YAML frontmatter + body."""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+from textwrap import dedent
+
+import pytest
+from hypothesis import given, settings, strategies as st
+
+from driftnote.filesystem.markdown_io import (
+    EntryDocument,
+    MalformedEntryError,
+    PhotoRef,
+    VideoRef,
+    read_entry,
+    write_entry,
+)
+
+
+def _doc(**overrides) -> EntryDocument:
+    base = EntryDocument(
+        date=date(2026, 5, 6),
+        mood="💪",
+        tags=["work", "cooking"],
+        photos=[PhotoRef(filename="IMG_4521.heic", caption="")],
+        videos=[VideoRef(filename="VID_4522.mov")],
+        created_at="2026-05-06T21:30:15Z",
+        updated_at="2026-05-06T21:30:15Z",
+        sources=["raw/2026-05-06T21-30-15Z.eml"],
+        body="Long day at work. #work\n",
+    )
+    return base.model_copy(update=overrides)
+
+
+def test_write_then_read_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    doc = _doc()
+    write_entry(path, doc)
+    loaded = read_entry(path)
+    assert loaded == doc
+
+
+def test_write_creates_parent_dir(tmp_path: Path) -> None:
+    path = tmp_path / "deeper" / "entry.md"
+    write_entry(path, _doc())
+    assert path.exists()
+
+
+def test_write_is_atomic(tmp_path: Path) -> None:
+    """write_entry replaces atomically (no half-written file visible)."""
+    path = tmp_path / "entry.md"
+    write_entry(path, _doc(body="first"))
+    write_entry(path, _doc(body="second"))
+    text = path.read_text()
+    assert "second" in text
+    # No leftover .tmp from os.replace pattern
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_read_handles_no_mood(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    write_entry(path, _doc(mood=None))
+    loaded = read_entry(path)
+    assert loaded.mood is None
+
+
+def test_read_handles_empty_tags_and_media(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    write_entry(path, _doc(tags=[], photos=[], videos=[]))
+    loaded = read_entry(path)
+    assert loaded.tags == []
+    assert loaded.photos == []
+    assert loaded.videos == []
+
+
+def test_read_rejects_missing_frontmatter(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    path.write_text("just a body, no frontmatter\n")
+    with pytest.raises(MalformedEntryError):
+        read_entry(path)
+
+
+def test_read_rejects_unterminated_frontmatter(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    path.write_text("---\ndate: 2026-05-06\nbody never ends\n")
+    with pytest.raises(MalformedEntryError):
+        read_entry(path)
+
+
+def test_read_rejects_bad_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "entry.md"
+    path.write_text("---\nfoo: : :\n---\nbody\n")
+    with pytest.raises(MalformedEntryError):
+        read_entry(path)
+
+
+def test_body_separator_preserved_for_multi_section_entries(tmp_path: Path) -> None:
+    """Multi-source entries put `---` between body sections; this is part of the
+    body text (not a frontmatter delimiter) and must round-trip."""
+    body = "First reply.\n\n---\n\nAfterthought.\n"
+    path = tmp_path / "entry.md"
+    write_entry(path, _doc(body=body))
+    assert read_entry(path).body == body
+
+
+@given(
+    body=st.text(
+        alphabet=st.characters(
+            blacklist_categories=("Cs",),  # exclude surrogates
+            blacklist_characters="\x00",
+        ),
+        min_size=0,
+        max_size=200,
+    ),
+    tags=st.lists(
+        st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789-_", min_size=1, max_size=20),
+        max_size=10,
+    ),
+    mood=st.one_of(st.none(), st.sampled_from(["💪", "🌧️", "☕", "🎉", "😴"])),
+)
+@settings(max_examples=30, deadline=None)
+def test_round_trip_property(tmp_path_factory, body: str, tags: list[str], mood: str | None) -> None:
+    path = tmp_path_factory.mktemp("entry") / "entry.md"
+    doc = _doc(body=body, tags=tags, mood=mood)
+    write_entry(path, doc)
+    loaded = read_entry(path)
+    assert loaded == doc
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_filesystem_markdown_io.py -v`
+Expected: FAIL — import error.
+
+- [ ] **Step 3: Implement `src/driftnote/filesystem/markdown_io.py`**
+
+```python
+"""Read and write `entry.md` — YAML frontmatter + markdown body.
+
+The frontmatter is parsed as YAML via PyYAML. Writes are atomic via
+`os.replace`. Multi-section bodies (when several email replies feed into the
+same date) keep `---` as an in-body separator; only the *first* `\\n---\\n`
+after the opening one is the frontmatter terminator.
+
+I/O uses `newline=""` to disable Python's universal-newline translation so
+bodies round-trip byte-for-byte regardless of any embedded `\\r` or other
+line-break characters. Property tests rely on this.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import date
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, Field
+
+
+class MalformedEntryError(ValueError):
+    """Raised when an entry.md file cannot be parsed as frontmatter+body."""
+
+
+class PhotoRef(BaseModel):
+    filename: str
+    caption: str = ""
+
+
+class VideoRef(BaseModel):
+    filename: str
+    caption: str = ""
+
+
+class EntryDocument(BaseModel):
+    date: date
+    mood: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    photos: list[PhotoRef] = Field(default_factory=list)
+    videos: list[VideoRef] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    sources: list[str] = Field(default_factory=list)
+    body: str = ""
+
+
+def read_entry(path: Path) -> EntryDocument:
+    """Parse entry.md at `path` into an EntryDocument. Raises MalformedEntryError on bad input."""
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    if not text.startswith("---\n"):
+        raise MalformedEntryError(f"{path}: missing opening frontmatter delimiter")
+
+    rest = text[len("---\n"):]
+    end_idx = rest.find("\n---\n")
+    if end_idx == -1:
+        # Could also be terminated by trailing ---\n with no body (hand-edited files only;
+        # write_entry() never produces this shape).
+        if rest.endswith("\n---"):
+            fm_text, body = rest[:-len("\n---")], ""
+        else:
+            raise MalformedEntryError(f"{path}: unterminated frontmatter")
+    else:
+        fm_text = rest[:end_idx]
+        body = rest[end_idx + len("\n---\n"):]
+
+    try:
+        fm = yaml.safe_load(fm_text) or {}
+    except yaml.YAMLError as exc:
+        raise MalformedEntryError(f"{path}: invalid YAML frontmatter: {exc}") from exc
+
+    if not isinstance(fm, dict):
+        raise MalformedEntryError(f"{path}: frontmatter is not a mapping")
+
+    fm["body"] = body
+    try:
+        return EntryDocument.model_validate(fm)
+    except Exception as exc:  # pydantic.ValidationError is the expected subclass
+        raise MalformedEntryError(f"{path}: invalid entry: {exc}") from exc
+
+
+def write_entry(path: Path, doc: EntryDocument) -> None:
+    """Atomically write `doc` to `path`. Creates parent dirs if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm_dict = doc.model_dump(mode="json", exclude={"body"})
+    fm_text = yaml.safe_dump(fm_dict, sort_keys=False, allow_unicode=True).rstrip()
+    rendered = f"---\n{fm_text}\n---\n{doc.body}"
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(rendered)
+    os.replace(tmp, path)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_filesystem_markdown_io.py -v`
+Expected: 9 tests + 1 hypothesis test passing.
+
+- [ ] **Step 5: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/filesystem/markdown_io.py tests/unit/test_filesystem_markdown_io.py
+git commit -m "feat(filesystem): atomic YAML-frontmatter entry.md read/write"
+```
+
+---
+
+### Task 3.3: `filesystem/locks.py`
+
+**Files:**
+- Create: `src/driftnote/filesystem/locks.py`
+- Create: `tests/unit/test_filesystem_locks.py`
+
+Per-date `fcntl.flock` so two concurrent ingestions for the same date serialize.
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+"""Tests for per-date file locks."""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+import time
+from datetime import date
+from pathlib import Path
+
+from driftnote.filesystem.locks import entry_lock
+
+
+def _holder(data_root_str: str, hold_seconds: float, started_at: list, finished_at: list) -> None:
+    from datetime import date as _date
+    from driftnote.filesystem.locks import entry_lock as _lock
+    with _lock(Path(data_root_str), _date(2026, 5, 6)):
+        started_at.append(time.monotonic())
+        time.sleep(hold_seconds)
+        finished_at.append(time.monotonic())
+
+
+def test_entry_lock_serializes_concurrent_holders(tmp_path: Path) -> None:
+    """Two processes holding the same date's lock must not overlap."""
+    mgr = mp.Manager()
+    started = mgr.list()
+    finished = mgr.list()
+    p1 = mp.Process(target=_holder, args=(str(tmp_path), 0.3, started, finished))
+    p2 = mp.Process(target=_holder, args=(str(tmp_path), 0.3, started, finished))
+    p1.start()
+    p2.start()
+    p1.join(timeout=10)
+    p2.join(timeout=10)
+    assert p1.exitcode == 0 and p2.exitcode == 0
+
+    # The second holder's start must be after the first holder's finish.
+    starts = sorted(started)
+    finishes = sorted(finished)
+    assert starts[1] >= finishes[0] - 0.05  # small slack for timer jitter
+
+
+def test_entry_lock_releases_on_exception(tmp_path: Path) -> None:
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        with entry_lock(tmp_path, date(2026, 5, 6)):
+            raise RuntimeError("boom")
+    # If the lock leaked, the next acquisition would block forever.
+    with entry_lock(tmp_path, date(2026, 5, 6)):
+        pass
+
+
+def test_entry_lock_creates_lock_file(tmp_path: Path) -> None:
+    with entry_lock(tmp_path, date(2026, 5, 6)):
+        # Lock file should live under data_root/locks/ keyed by date.
+        lock_files = list((tmp_path / "locks").glob("2026-05-06.lock"))
+        assert lock_files
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_filesystem_locks.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/filesystem/locks.py`**
+
+```python
+"""Per-date file locks via fcntl.flock.
+
+A lock file lives under `data_root/locks/YYYY-MM-DD.lock`. Acquiring an
+`entry_lock(data_root, date)` blocks until any other holder releases.
+
+Spec §6 describes "per-date `fcntl.flock` on entry directory"; we instead
+keep all lock files under a sibling `locks/` directory so the lock can be
+acquired before the entry directory exists (first-time ingestion). The
+serialization guarantee is identical.
+"""
+
+from __future__ import annotations
+
+import fcntl
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import date
+from pathlib import Path
+
+
+@contextmanager
+def entry_lock(data_root: Path, d: date) -> Iterator[None]:
+    """Hold an exclusive lock on the per-date lock file. Blocks until acquired."""
+    lock_dir = data_root / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{d.isoformat()}.lock"
+    # Append mode creates the file if absent; we never read/write its contents,
+    # we just need an fd to flock on.
+    with lock_path.open("a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_filesystem_locks.py -v`
+Expected: 3 passed (the multiprocessing test takes ~0.6s).
+
+- [ ] **Step 5: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/filesystem/locks.py tests/unit/test_filesystem_locks.py
+git commit -m "feat(filesystem): per-date fcntl.flock for serializing ingestion"
+```
+
+---
+
+### Chunk 3 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–3 tests pass: `uv run pytest -v` (≥25 tests).
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] Filesystem layer reads/writes entry.md round-trips via property tests.
+- [ ] 3 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** Filesystem layer is ready. Chunk 4 (repository) and Chunk 5 (mail transport) can be developed in parallel worktrees from this point.
+
+---
+
+## Chunk 4: Repository
+
+**Outcome of this chunk:** A `repository/` module providing the CRUD + query API the rest of the codebase will use to talk to SQLite. ORM types do not leak above this layer — every public function returns Pydantic records. Covers entries+tags, media, job_runs, ingested_messages, pending_prompts, and disk_state.
+
+### Task 4.1: `repository/entries.py` — entry + tag CRUD + queries
+
+**Files:**
+- Create: `src/driftnote/repository/__init__.py`
+- Create: `src/driftnote/repository/entries.py`
+- Create: `tests/unit/test_repository_entries.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+"""Tests for the entries repository."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.entries import (
+    EntryRecord,
+    count_entries_in_range,
+    delete_entry,
+    get_entry,
+    list_entries_by_month,
+    list_entries_by_tag,
+    list_entries_in_range,
+    replace_tags,
+    search_fts,
+    tag_frequencies_in_range,
+    upsert_entry,
+)
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def _record(date: str = "2026-05-06", **overrides) -> EntryRecord:
+    base = EntryRecord(
+        date=date,
+        mood="💪",
+        body_text="cracked the migration bug today",
+        body_md="cracked the migration bug today #work",
+        created_at="2026-05-06T21:30:15Z",
+        updated_at="2026-05-06T21:30:15Z",
+    )
+    return base.model_copy(update=overrides)
+
+
+def test_upsert_inserts_new_entry(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record())
+    with session_scope(engine) as session:
+        got = get_entry(session, "2026-05-06")
+    assert got is not None
+    assert got.mood == "💪"
+    assert got.body_text == "cracked the migration bug today"
+
+
+def test_upsert_updates_existing_entry(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(mood="💪", body_text="v1", body_md="v1"))
+        upsert_entry(session, _record(mood="🎉", body_text="v2", body_md="v2 #celebrate"))
+    with session_scope(engine) as session:
+        got = get_entry(session, "2026-05-06")
+    assert got is not None
+    assert got.mood == "🎉"
+    assert got.body_text == "v2"
+
+
+def test_replace_tags_overwrites_previous(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record())
+        replace_tags(session, "2026-05-06", ["work", "cooking"])
+        replace_tags(session, "2026-05-06", ["work", "rest"])
+    with session_scope(engine) as session:
+        entries = list_entries_by_tag(session, "rest")
+        cooking = list_entries_by_tag(session, "cooking")
+    assert [e.date for e in entries] == ["2026-05-06"]
+    assert cooking == []
+
+
+def test_replace_tags_lowercases(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record())
+        replace_tags(session, "2026-05-06", ["Work", "COOKING"])
+    with session_scope(engine) as session:
+        ents_work = list_entries_by_tag(session, "work")
+        ents_cooking = list_entries_by_tag(session, "cooking")
+    assert ents_work and ents_cooking
+
+
+def test_list_entries_by_month_orders_by_date(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-06"))
+        upsert_entry(session, _record(date="2026-05-01"))
+        upsert_entry(session, _record(date="2026-04-30"))
+    with session_scope(engine) as session:
+        may = list_entries_by_month(session, 2026, 5)
+    assert [e.date for e in may] == ["2026-05-01", "2026-05-06"]
+
+
+def test_count_and_tag_frequencies_in_range(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-01"))
+        replace_tags(session, "2026-05-01", ["work", "cooking"])
+        upsert_entry(session, _record(date="2026-05-02"))
+        replace_tags(session, "2026-05-02", ["work"])
+        upsert_entry(session, _record(date="2026-04-30"))
+        replace_tags(session, "2026-04-30", ["cooking"])
+    with session_scope(engine) as session:
+        n = count_entries_in_range(session, "2026-05-01", "2026-05-31")
+        freq = tag_frequencies_in_range(session, "2026-05-01", "2026-05-31")
+    assert n == 2
+    assert freq == {"work": 2, "cooking": 1}
+
+
+def test_search_fts_matches_body(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-01", body_text="risotto night was great"))
+        upsert_entry(session, _record(date="2026-05-02", body_text="rainy walk in the park"))
+    with session_scope(engine) as session:
+        hits = search_fts(session, "risotto")
+    assert [e.date for e in hits] == ["2026-05-01"]
+
+
+def test_delete_entry_cascades_tags(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record())
+        replace_tags(session, "2026-05-06", ["work"])
+        delete_entry(session, "2026-05-06")
+    with session_scope(engine) as session:
+        assert get_entry(session, "2026-05-06") is None
+        assert list_entries_by_tag(session, "work") == []
+
+
+def test_list_entries_in_range_inclusive(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        for d in ("2026-05-01", "2026-05-02", "2026-05-03"):
+            upsert_entry(session, _record(date=d))
+    with session_scope(engine) as session:
+        rs = list_entries_in_range(session, "2026-05-02", "2026-05-03")
+    assert [e.date for e in rs] == ["2026-05-02", "2026-05-03"]
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_repository_entries.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/repository/__init__.py`** (empty)
+
+```python
+"""Repository: SQL access. ORM types do not leak above this layer."""
+```
+
+- [ ] **Step 4: Implement `src/driftnote/repository/entries.py`**
+
+```python
+"""CRUD and queries for entries + tags. ORM types do not leak above this layer.
+
+All public functions take an open SQLAlchemy `Session` and return Pydantic
+records (`EntryRecord`) — never `Entry` ORM instances.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+from pydantic import BaseModel
+from sqlalchemy import delete, select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
+
+from driftnote.models import Entry, Tag
+
+
+class EntryRecord(BaseModel):
+    date: str
+    mood: str | None = None
+    body_text: str
+    body_md: str
+    created_at: str
+    updated_at: str
+
+
+def _to_record(e: Entry) -> EntryRecord:
+    return EntryRecord(
+        date=e.date,
+        mood=e.mood,
+        body_text=e.body_text,
+        body_md=e.body_md,
+        created_at=e.created_at,
+        updated_at=e.updated_at,
+    )
+
+
+def upsert_entry(session: Session, record: EntryRecord) -> None:
+    """Insert-or-update by primary key `date`. Idempotent."""
+    stmt = (
+        sqlite_insert(Entry)
+        .values(
+            date=record.date,
+            mood=record.mood,
+            body_text=record.body_text,
+            body_md=record.body_md,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+        .on_conflict_do_update(
+            index_elements=["date"],
+            set_={
+                "mood": record.mood,
+                "body_text": record.body_text,
+                "body_md": record.body_md,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            },
+        )
+    )
+    session.execute(stmt)
+
+
+def get_entry(session: Session, date: str) -> EntryRecord | None:
+    e = session.scalar(select(Entry).where(Entry.date == date))
+    return _to_record(e) if e else None
+
+
+def list_entries_by_month(session: Session, year: int, month: int) -> list[EntryRecord]:
+    prefix = f"{year:04d}-{month:02d}-"
+    stmt = select(Entry).where(Entry.date.like(f"{prefix}%")).order_by(Entry.date)
+    return [_to_record(e) for e in session.scalars(stmt)]
+
+
+def list_entries_in_range(session: Session, start: str, end: str) -> list[EntryRecord]:
+    stmt = select(Entry).where(Entry.date.between(start, end)).order_by(Entry.date)
+    return [_to_record(e) for e in session.scalars(stmt)]
+
+
+def list_entries_by_tag(session: Session, tag: str) -> list[EntryRecord]:
+    stmt = (
+        select(Entry)
+        .join(Tag, Tag.date == Entry.date)
+        .where(Tag.tag == tag.lower())
+        .order_by(Entry.date.desc())
+    )
+    return [_to_record(e) for e in session.scalars(stmt)]
+
+
+def count_entries_in_range(session: Session, start: str, end: str) -> int:
+    from sqlalchemy import func
+    stmt = select(func.count()).select_from(Entry).where(Entry.date.between(start, end))
+    return session.scalar(stmt) or 0
+
+
+def tag_frequencies_in_range(session: Session, start: str, end: str) -> dict[str, int]:
+    """Tag.date is the FK to entries.date, so we don't need to join Entry."""
+    stmt = select(Tag.tag).where(Tag.date.between(start, end))
+    counter: Counter[str] = Counter(session.scalars(stmt))
+    return dict(counter)
+
+
+def replace_tags(session: Session, date: str, tags: list[str]) -> None:
+    """Replace all tags for `date` with the given list (lowercased, deduplicated)."""
+    session.execute(delete(Tag).where(Tag.date == date))
+    seen: set[str] = set()
+    for raw in tags:
+        normalized = raw.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        session.add(Tag(date=date, tag=normalized))
+
+
+def search_fts(session: Session, query: str) -> list[EntryRecord]:
+    """Full-text search via FTS5. Returns most-recently-dated matches first."""
+    rows = session.execute(
+        text(
+            "SELECT date FROM entries "
+            "WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH :q) "
+            "ORDER BY date DESC"
+        ),
+        {"q": query},
+    ).all()
+    if not rows:
+        return []
+    dates = [r[0] for r in rows]
+    stmt = select(Entry).where(Entry.date.in_(dates)).order_by(Entry.date.desc())
+    return [_to_record(e) for e in session.scalars(stmt)]
+
+
+def delete_entry(session: Session, date: str) -> None:
+    session.execute(delete(Entry).where(Entry.date == date))
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_repository_entries.py -v`
+Expected: 9 passed.
+
+- [ ] **Step 6: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/repository/__init__.py src/driftnote/repository/entries.py tests/unit/test_repository_entries.py
+git commit -m "feat(repository): entries + tags CRUD with FTS search"
+```
+
+---
+
+### Task 4.2: `repository/media.py`
+
+**Files:**
+- Create: `src/driftnote/repository/media.py`
+- Create: `tests/unit/test_repository_media.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+"""Tests for the media repository."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.entries import EntryRecord, upsert_entry
+from driftnote.repository.media import MediaInput, list_media, replace_media
+
+
+@pytest.fixture
+def engine_with_entry(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-05-06",
+                mood="💪",
+                body_text="hi",
+                body_md="hi",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+    return eng
+
+
+def test_replace_media_inserts_in_order(engine_with_entry: Engine) -> None:
+    eng = engine_with_entry
+    with session_scope(eng) as session:
+        replace_media(
+            session,
+            "2026-05-06",
+            [
+                MediaInput(kind="photo", filename="a.heic"),
+                MediaInput(kind="photo", filename="b.jpg"),
+                MediaInput(kind="video", filename="v.mov", caption="walk"),
+            ],
+        )
+    with session_scope(eng) as session:
+        items = list_media(session, "2026-05-06")
+    assert [(m.ord, m.kind, m.filename) for m in items] == [
+        (0, "photo", "a.heic"),
+        (1, "photo", "b.jpg"),
+        (2, "video", "v.mov"),
+    ]
+    assert items[2].caption == "walk"
+
+
+def test_replace_media_overwrites_previous(engine_with_entry: Engine) -> None:
+    eng = engine_with_entry
+    with session_scope(eng) as session:
+        replace_media(session, "2026-05-06", [MediaInput(kind="photo", filename="old.heic")])
+        replace_media(session, "2026-05-06", [MediaInput(kind="photo", filename="new.heic")])
+    with session_scope(eng) as session:
+        items = list_media(session, "2026-05-06")
+    assert [m.filename for m in items] == ["new.heic"]
+
+
+def test_list_media_for_unknown_date_is_empty(engine_with_entry: Engine) -> None:
+    with session_scope(engine_with_entry) as session:
+        assert list_media(session, "2099-01-01") == []
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_repository_media.py -v`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement `src/driftnote/repository/media.py`**
+
+```python
+"""Media (photo/video) row management. One row per media file per entry, with display order."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from driftnote.models import Media
+
+
+class MediaInput(BaseModel):
+    kind: Literal["photo", "video"]
+    filename: str
+    caption: str = ""
+
+
+class MediaRecord(BaseModel):
+    date: str
+    kind: Literal["photo", "video"]
+    filename: str
+    ord: int
+    caption: str
+
+
+def _to_record(m: Media) -> MediaRecord:
+    return MediaRecord(
+        date=m.date,
+        kind=m.kind,  # type: ignore[arg-type]
+        filename=m.filename,
+        ord=m.ord,
+        caption=m.caption,
+    )
+
+
+def replace_media(session: Session, date: str, items: list[MediaInput]) -> None:
+    """Drop and re-insert all media rows for `date` in the given order."""
+    session.execute(delete(Media).where(Media.date == date))
+    for ord_, item in enumerate(items):
+        session.add(
+            Media(
+                date=date,
+                kind=item.kind,
+                filename=item.filename,
+                ord=ord_,
+                caption=item.caption,
+            )
+        )
+
+
+def list_media(session: Session, date: str) -> list[MediaRecord]:
+    stmt = select(Media).where(Media.date == date).order_by(Media.ord)
+    return [_to_record(m) for m in session.scalars(stmt)]
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_repository_media.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/repository/media.py tests/unit/test_repository_media.py
+git commit -m "feat(repository): media row management"
+```
+
+---
+
+### Task 4.3: `repository/jobs.py` — job_runs + alert dedup helpers
+
+**Files:**
+- Create: `src/driftnote/repository/jobs.py`
+- Create: `tests/unit/test_repository_jobs.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+"""Tests for the job_runs repository."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.jobs import (
+    JobRunRecord,
+    acknowledge_run,
+    finish_job_run,
+    last_run,
+    last_successful_run,
+    recent_alerts_of_kind,
+    recent_failures,
+    record_job_run,
+)
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def test_record_then_finish_run(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        run_id = record_job_run(session, job="imap_poll", started_at="2026-05-06T21:00:00Z")
+    with session_scope(engine) as session:
+        finish_job_run(
+            session,
+            run_id=run_id,
+            finished_at="2026-05-06T21:00:05Z",
+            status="ok",
+            detail="ingested 1",
+        )
+    with session_scope(engine) as session:
+        latest = last_run(session, "imap_poll")
+    assert latest is not None
+    assert latest.status == "ok"
+    assert latest.detail == "ingested 1"
+
+
+def test_last_successful_run_skips_errors(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        ok_id = record_job_run(session, job="imap_poll", started_at="2026-05-06T20:00:00Z")
+        finish_job_run(session, run_id=ok_id, finished_at="2026-05-06T20:00:01Z", status="ok")
+        err_id = record_job_run(session, job="imap_poll", started_at="2026-05-06T21:00:00Z")
+        finish_job_run(
+            session,
+            run_id=err_id,
+            finished_at="2026-05-06T21:00:01Z",
+            status="error",
+            error_kind="imap_auth",
+        )
+    with session_scope(engine) as session:
+        ok = last_successful_run(session, "imap_poll")
+        any_run = last_run(session, "imap_poll")
+    assert ok is not None and ok.status == "ok"
+    assert any_run is not None and any_run.status == "error"
+
+
+def test_recent_failures_within_days(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        old = record_job_run(session, job="backup", started_at="2026-04-01T00:00:00Z")
+        finish_job_run(session, run_id=old, finished_at="2026-04-01T00:00:01Z", status="error")
+        new = record_job_run(session, job="backup", started_at="2026-05-05T00:00:00Z")
+        finish_job_run(session, run_id=new, finished_at="2026-05-05T00:00:01Z", status="error")
+    with session_scope(engine) as session:
+        within_7 = recent_failures(session, now="2026-05-06T00:00:00Z", days=7)
+    assert [r.id for r in within_7] == [new]
+
+
+def test_recent_alerts_of_kind_for_dedup(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        a = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(
+            session,
+            run_id=a,
+            finished_at="2026-05-06T08:00:01Z",
+            status="error",
+            error_kind="imap_auth",
+        )
+    with session_scope(engine) as session:
+        in_24h = recent_alerts_of_kind(
+            session,
+            error_kind="imap_auth",
+            now="2026-05-06T20:00:00Z",
+            hours=24,
+        )
+        old = recent_alerts_of_kind(
+            session,
+            error_kind="imap_auth",
+            now="2026-05-08T20:00:00Z",
+            hours=24,
+        )
+    assert len(in_24h) == 1
+    assert old == []
+
+
+def test_acknowledge_run(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        a = record_job_run(session, job="imap_poll", started_at="t")
+        finish_job_run(session, run_id=a, finished_at="t", status="error")
+    with session_scope(engine) as session:
+        acknowledge_run(session, run_id=a, at="2026-05-06T22:00:00Z")
+    with session_scope(engine) as session:
+        unack = recent_failures(session, now="2026-05-06T23:00:00Z", days=7, only_unacknowledged=True)
+    assert unack == []
+
+
+def test_record_returns_running_record(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        run_id = record_job_run(session, job="imap_poll", started_at="t")
+        latest = last_run(session, "imap_poll")
+    assert latest is not None
+    assert latest.id == run_id
+    assert latest.status == "running"
+    assert isinstance(latest, JobRunRecord)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_repository_jobs.py -v`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement `src/driftnote/repository/jobs.py`**
+
+```python
+"""job_runs CRUD + helpers used by the scheduler runner and admin/banner code."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from driftnote.models import JobRun
+
+JobName = Literal[
+    "daily_prompt",
+    "imap_poll",
+    "digest_weekly",
+    "digest_monthly",
+    "digest_yearly",
+    "backup",
+    "disk_check",
+]
+RunStatus = Literal["running", "ok", "warn", "error"]
+
+
+class JobRunRecord(BaseModel):
+    id: int
+    job: str
+    started_at: str
+    finished_at: str | None = None
+    status: str
+    detail: str | None = None
+    error_kind: str | None = None
+    error_message: str | None = None
+    acknowledged_at: str | None = None
+
+
+def _to_record(r: JobRun) -> JobRunRecord:
+    return JobRunRecord(
+        id=r.id,
+        job=r.job,
+        started_at=r.started_at,
+        finished_at=r.finished_at,
+        status=r.status,
+        detail=r.detail,
+        error_kind=r.error_kind,
+        error_message=r.error_message,
+        acknowledged_at=r.acknowledged_at,
+    )
+
+
+def record_job_run(session: Session, *, job: str, started_at: str) -> int:
+    row = JobRun(job=job, started_at=started_at, status="running")
+    session.add(row)
+    session.flush()
+    return row.id
+
+
+def finish_job_run(
+    session: Session,
+    *,
+    run_id: int,
+    finished_at: str,
+    status: RunStatus,
+    detail: str | None = None,
+    error_kind: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    session.execute(
+        update(JobRun)
+        .where(JobRun.id == run_id)
+        .values(
+            finished_at=finished_at,
+            status=status,
+            detail=detail,
+            error_kind=error_kind,
+            error_message=error_message,
+        )
+    )
+
+
+def acknowledge_run(session: Session, *, run_id: int, at: str) -> None:
+    session.execute(update(JobRun).where(JobRun.id == run_id).values(acknowledged_at=at))
+
+
+def last_run(session: Session, job: str) -> JobRunRecord | None:
+    stmt = select(JobRun).where(JobRun.job == job).order_by(JobRun.started_at.desc()).limit(1)
+    r = session.scalar(stmt)
+    return _to_record(r) if r else None
+
+
+def last_successful_run(session: Session, job: str) -> JobRunRecord | None:
+    stmt = (
+        select(JobRun)
+        .where(JobRun.job == job, JobRun.status == "ok")
+        .order_by(JobRun.started_at.desc())
+        .limit(1)
+    )
+    r = session.scalar(stmt)
+    return _to_record(r) if r else None
+
+
+def recent_failures(
+    session: Session,
+    *,
+    now: str,
+    days: int = 7,
+    only_unacknowledged: bool = False,
+) -> list[JobRunRecord]:
+    """Return error/warn rows started within `days` of `now`, newest first."""
+    cutoff = _shift_iso(now, days_delta=-days)
+    stmt = (
+        select(JobRun)
+        .where(JobRun.status.in_(["error", "warn"]))
+        .where(JobRun.started_at >= cutoff)
+        .order_by(JobRun.started_at.desc())
+    )
+    if only_unacknowledged:
+        stmt = stmt.where(JobRun.acknowledged_at.is_(None))
+    return [_to_record(r) for r in session.scalars(stmt)]
+
+
+def recent_alerts_of_kind(
+    session: Session,
+    *,
+    error_kind: str,
+    now: str,
+    hours: int = 24,
+) -> list[JobRunRecord]:
+    cutoff = _shift_iso(now, hours_delta=-hours)
+    stmt = (
+        select(JobRun)
+        .where(JobRun.error_kind == error_kind)
+        .where(JobRun.started_at >= cutoff)
+        .order_by(JobRun.started_at.desc())
+    )
+    return [_to_record(r) for r in session.scalars(stmt)]
+
+
+def _shift_iso(iso: str, *, days_delta: int = 0, hours_delta: int = 0) -> str:
+    """Return iso shifted by the given delta. Centralized so callers don't reimplement parsing."""
+    from datetime import datetime, timedelta, timezone
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    out = dt + timedelta(days=days_delta, hours=hours_delta)
+    return out.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_repository_jobs.py -v`
+Expected: 6 passed.
+
+- [ ] **Step 5: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/repository/jobs.py tests/unit/test_repository_jobs.py
+git commit -m "feat(repository): job_runs CRUD with alert dedup helpers"
+```
+
+---
+
+### Task 4.4: `repository/ingested.py` — ingested_messages + pending_prompts + disk_state
+
+**Files:**
+- Create: `src/driftnote/repository/ingested.py`
+- Create: `tests/unit/test_repository_ingested.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+"""Tests for ingested_messages, pending_prompts, and disk_state repositories."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.entries import EntryRecord, upsert_entry
+from driftnote.repository.ingested import (
+    PendingPromptRecord,
+    clear_threshold_crossed,
+    find_prompt_by_message_id,
+    get_ingested,
+    get_threshold_crossed_at,
+    is_ingested,
+    mark_imap_moved,
+    pending_imap_moves,
+    record_ingested,
+    record_pending_prompt,
+    record_threshold_crossed,
+)
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-05-06",
+                mood=None,
+                body_text="x",
+                body_md="x",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+    return eng
+
+
+def test_ingested_round_trip(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        record_ingested(
+            session,
+            message_id="<m1@gmail>",
+            date="2026-05-06",
+            eml_path="raw/2026-05-06T21-30-15Z.eml",
+            ingested_at="2026-05-06T21:30:20Z",
+        )
+    with session_scope(engine) as session:
+        assert is_ingested(session, "<m1@gmail>")
+        rec = get_ingested(session, "<m1@gmail>")
+    assert rec is not None
+    assert rec.message_id == "<m1@gmail>"
+    assert rec.imap_moved == 0
+
+
+def test_mark_imap_moved_and_pending_query(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        record_ingested(
+            session,
+            message_id="<m1@gmail>",
+            date="2026-05-06",
+            eml_path="raw/x.eml",
+            ingested_at="t",
+        )
+        record_ingested(
+            session,
+            message_id="<m2@gmail>",
+            date="2026-05-06",
+            eml_path="raw/y.eml",
+            ingested_at="t",
+        )
+        mark_imap_moved(session, "<m1@gmail>")
+    with session_scope(engine) as session:
+        pending = pending_imap_moves(session)
+    assert {r.message_id for r in pending} == {"<m2@gmail>"}
+
+
+def test_record_pending_prompt_and_lookup(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        record_pending_prompt(
+            session,
+            date="2026-05-06",
+            message_id="<prompt-2026-05-06@driftnote>",
+            sent_at="2026-05-06T21:00:00Z",
+        )
+    with session_scope(engine) as session:
+        rec = find_prompt_by_message_id(session, "<prompt-2026-05-06@driftnote>")
+    assert isinstance(rec, PendingPromptRecord)
+    assert rec.date == "2026-05-06"
+
+
+def test_disk_state_threshold_lifecycle(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        assert get_threshold_crossed_at(session, 80) is None
+        record_threshold_crossed(session, threshold=80, at="2026-05-06T03:00:00Z")
+    with session_scope(engine) as session:
+        assert get_threshold_crossed_at(session, 80) == "2026-05-06T03:00:00Z"
+    with session_scope(engine) as session:
+        clear_threshold_crossed(session, 80)
+    with session_scope(engine) as session:
+        assert get_threshold_crossed_at(session, 80) is None
+
+
+def test_pending_prompt_unique_message_id(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        record_pending_prompt(session, date="2026-05-06", message_id="<m@x>", sent_at="t")
+    with session_scope(engine) as session:
+        # Re-recording the same date with the same message_id is an upsert (idempotent on the date PK).
+        record_pending_prompt(session, date="2026-05-06", message_id="<m@x>", sent_at="t2")
+    with session_scope(engine) as session:
+        rec = find_prompt_by_message_id(session, "<m@x>")
+    assert rec is not None
+    assert rec.sent_at == "t2"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_repository_ingested.py -v`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement `src/driftnote/repository/ingested.py`**
+
+```python
+"""ingested_messages, pending_prompts, disk_state — the email-flow + disk state tables."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
+
+from driftnote.models import DiskState, IngestedMessage, PendingPrompt
+
+
+class IngestedMessageRecord(BaseModel):
+    message_id: str
+    date: str
+    eml_path: str
+    ingested_at: str
+    imap_moved: int
+
+
+class PendingPromptRecord(BaseModel):
+    date: str
+    message_id: str
+    sent_at: str
+
+
+def record_ingested(
+    session: Session,
+    *,
+    message_id: str,
+    date: str,
+    eml_path: str,
+    ingested_at: str,
+) -> None:
+    session.add(
+        IngestedMessage(
+            message_id=message_id,
+            date=date,
+            eml_path=eml_path,
+            ingested_at=ingested_at,
+            imap_moved=0,
+        )
+    )
+
+
+def is_ingested(session: Session, message_id: str) -> bool:
+    return session.scalar(select(IngestedMessage.message_id).where(IngestedMessage.message_id == message_id)) is not None
+
+
+def get_ingested(session: Session, message_id: str) -> IngestedMessageRecord | None:
+    row = session.scalar(select(IngestedMessage).where(IngestedMessage.message_id == message_id))
+    if row is None:
+        return None
+    return IngestedMessageRecord(
+        message_id=row.message_id,
+        date=row.date,
+        eml_path=row.eml_path,
+        ingested_at=row.ingested_at,
+        imap_moved=row.imap_moved,
+    )
+
+
+def mark_imap_moved(session: Session, message_id: str) -> None:
+    session.execute(
+        update(IngestedMessage)
+        .where(IngestedMessage.message_id == message_id)
+        .values(imap_moved=1)
+    )
+
+
+def pending_imap_moves(session: Session) -> list[IngestedMessageRecord]:
+    rows = session.scalars(select(IngestedMessage).where(IngestedMessage.imap_moved == 0))
+    return [
+        IngestedMessageRecord(
+            message_id=r.message_id,
+            date=r.date,
+            eml_path=r.eml_path,
+            ingested_at=r.ingested_at,
+            imap_moved=r.imap_moved,
+        )
+        for r in rows
+    ]
+
+
+def record_pending_prompt(
+    session: Session,
+    *,
+    date: str,
+    message_id: str,
+    sent_at: str,
+) -> None:
+    """Idempotent on `date` (the PK)."""
+    stmt = (
+        sqlite_insert(PendingPrompt)
+        .values(date=date, message_id=message_id, sent_at=sent_at)
+        .on_conflict_do_update(
+            index_elements=["date"],
+            set_={"message_id": message_id, "sent_at": sent_at},
+        )
+    )
+    session.execute(stmt)
+
+
+def find_prompt_by_message_id(session: Session, message_id: str) -> PendingPromptRecord | None:
+    row = session.scalar(select(PendingPrompt).where(PendingPrompt.message_id == message_id))
+    if row is None:
+        return None
+    return PendingPromptRecord(date=row.date, message_id=row.message_id, sent_at=row.sent_at)
+
+
+def get_threshold_crossed_at(session: Session, threshold: int) -> str | None:
+    row = session.scalar(select(DiskState).where(DiskState.threshold_percent == threshold))
+    return row.crossed_at if row else None
+
+
+def record_threshold_crossed(session: Session, *, threshold: int, at: str) -> None:
+    stmt = (
+        sqlite_insert(DiskState)
+        .values(threshold_percent=threshold, crossed_at=at)
+        .on_conflict_do_update(
+            index_elements=["threshold_percent"],
+            set_={"crossed_at": at},
+        )
+    )
+    session.execute(stmt)
+
+
+def clear_threshold_crossed(session: Session, threshold: int) -> None:
+    session.execute(delete(DiskState).where(DiskState.threshold_percent == threshold))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_repository_ingested.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Lint, typecheck, commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/repository/ingested.py tests/unit/test_repository_ingested.py
+git commit -m "feat(repository): ingested_messages + pending_prompts + disk_state"
+```
+
+---
+
+### Chunk 4 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–4 tests pass: `uv run pytest -v` (≥48 tests).
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] Repository layer covers entries, tags, media, jobs, ingested, pending_prompts, disk_state — no ORM types leak above this layer (lint with a quick grep: `grep -RnE 'from driftnote.models' src/driftnote/web src/driftnote/ingest src/driftnote/scheduler` should be empty when those layers exist).
+- [ ] 4 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** Chunks 4 and 5 (mail transport) can run in parallel from the end of Chunk 3 since neither depends on the other. Chunk 6 (ingestion pipeline) needs both.
