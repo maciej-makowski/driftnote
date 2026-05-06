@@ -5568,3 +5568,1158 @@ git commit -m "feat(ingest): orchestrated pipeline with rollback + idempotency"
 - [ ] 3 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off:** With ingestion complete, Chunks 7 (scheduler+jobs), 8 (digest rendering), and 9 (web layer) can be developed in parallel worktrees.
+
+---
+
+## Chunk 7: Scheduler, jobs, alerts
+
+**Outcome of this chunk:** APScheduler-based runner with a `job_run` context manager that records each scheduled invocation in SQLite. Concrete jobs: daily prompt send, IMAP poll → ingest, disk-usage check with threshold alerts. Self-emailing alerts module with 24-hour dedup. Digest jobs are introduced in Chunk 8 alongside the digest renderers.
+
+### Task 7.1: `alerts.py` — self-email with 24h dedup
+
+**Files:**
+- Create: `src/driftnote/alerts.py`
+- Create: `tests/unit/test_alerts.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for alert dispatch with 24h dedup."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.alerts import AlertSender, dispatch_alert
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.jobs import finish_job_run, record_job_run
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+class _FakeSender(AlertSender):
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []  # (kind, subject, body)
+
+    async def send(self, *, kind: str, subject: str, body: str) -> None:
+        self.sent.append((kind, subject, body))
+
+
+def test_dispatch_alert_sends_first_time(engine: Engine) -> None:
+    sender = _FakeSender()
+    import asyncio
+    asyncio.run(
+        dispatch_alert(
+            engine=engine,
+            sender=sender,
+            kind="imap_auth",
+            subject="IMAP login failing",
+            body="repeated failure",
+            now="2026-05-06T20:00:00Z",
+        )
+    )
+    assert sender.sent == [("imap_auth", "IMAP login failing", "repeated failure")]
+
+
+def test_dispatch_alert_dedups_within_24h(engine: Engine) -> None:
+    # Pre-populate a recent alert of the same kind.
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="alert", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(
+            session,
+            run_id=rid,
+            finished_at="2026-05-06T08:00:01Z",
+            status="error",
+            error_kind="imap_auth",
+            error_message="prior alert",
+        )
+
+    sender = _FakeSender()
+    import asyncio
+    asyncio.run(
+        dispatch_alert(
+            engine=engine,
+            sender=sender,
+            kind="imap_auth",
+            subject="again",
+            body="dup",
+            now="2026-05-06T20:00:00Z",
+        )
+    )
+    assert sender.sent == []  # deduped
+
+
+def test_dispatch_alert_records_a_job_run_row(engine: Engine) -> None:
+    sender = _FakeSender()
+    import asyncio
+    asyncio.run(
+        dispatch_alert(
+            engine=engine,
+            sender=sender,
+            kind="disk_warn",
+            subject="disk 80%",
+            body="...",
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    from driftnote.repository.jobs import last_run
+    with session_scope(engine) as session:
+        row = last_run(session, "alert")
+    assert row is not None
+    assert row.error_kind == "disk_warn"
+    assert row.status == "ok"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_alerts.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/alerts.py`**
+
+```python
+"""Self-emailing alerts with 24h dedup keyed on `error_kind`.
+
+Callers pass an `AlertSender` so tests can substitute an in-memory fake while
+production wires in an SMTP-backed sender.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.repository.jobs import (
+    finish_job_run,
+    recent_alerts_of_kind,
+    record_job_run,
+)
+
+
+class AlertSender(Protocol):
+    async def send(self, *, kind: str, subject: str, body: str) -> None: ...
+
+
+async def dispatch_alert(
+    *,
+    engine: Engine,
+    sender: AlertSender,
+    kind: str,
+    subject: str,
+    body: str,
+    now: str,
+) -> None:
+    """Send an alert email, deduplicated against any prior alert of the same `kind`
+    within the last 24 hours. Always records a job_runs row with job='alert'."""
+    with session_scope(engine) as session:
+        recent = recent_alerts_of_kind(session, error_kind=kind, now=now, hours=24)
+
+    run_id: int
+    with session_scope(engine) as session:
+        run_id = record_job_run(session, job="alert", started_at=now)
+
+    if recent:
+        with session_scope(engine) as session:
+            finish_job_run(
+                session,
+                run_id=run_id,
+                finished_at=now,
+                status="ok",
+                detail="deduped",
+                error_kind=kind,
+            )
+        return
+
+    try:
+        await sender.send(kind=kind, subject=subject, body=body)
+    except Exception as exc:
+        with session_scope(engine) as session:
+            finish_job_run(
+                session,
+                run_id=run_id,
+                finished_at=now,
+                status="error",
+                error_kind=kind,
+                error_message=str(exc)[:2000],
+            )
+        raise
+
+    with session_scope(engine) as session:
+        finish_job_run(
+            session,
+            run_id=run_id,
+            finished_at=now,
+            status="ok",
+            detail="sent",
+            error_kind=kind,
+        )
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_alerts.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/alerts.py tests/unit/test_alerts.py
+git commit -m "feat(alerts): self-email dispatch with 24h dedup"
+```
+
+---
+
+### Task 7.2: `scheduler/runner.py` — APScheduler + job_run context manager
+
+**Files:**
+- Create: `src/driftnote/scheduler/__init__.py`
+- Create: `src/driftnote/scheduler/runner.py`
+- Create: `tests/unit/test_scheduler_runner.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for the job_run context manager + APScheduler bootstrap."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import datetime, timezone
+from pathlib import Path
+
+import freezegun
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.jobs import last_run
+from driftnote.scheduler.runner import build_scheduler, job_run
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def test_job_run_records_ok_on_success(engine: Engine) -> None:
+    with freezegun.freeze_time("2026-05-06T21:00:00Z"):
+        with job_run(engine, "imap_poll") as run:
+            run.detail("ingested 1")
+    with session_scope(engine) as session:
+        row = last_run(session, "imap_poll")
+    assert row is not None
+    assert row.status == "ok"
+    assert row.detail == "ingested 1"
+    assert row.finished_at is not None
+
+
+def test_job_run_records_error_on_exception(engine: Engine) -> None:
+    with freezegun.freeze_time("2026-05-06T21:00:00Z"):
+        with pytest.raises(RuntimeError):
+            with job_run(engine, "imap_poll") as run:
+                run.set_error_kind("imap_auth")
+                raise RuntimeError("boom")
+    with session_scope(engine) as session:
+        row = last_run(session, "imap_poll")
+    assert row is not None
+    assert row.status == "error"
+    assert row.error_kind == "imap_auth"
+    assert "boom" in (row.error_message or "")
+
+
+def test_build_scheduler_uses_configured_timezone() -> None:
+    sched = build_scheduler(timezone="Europe/London")
+    assert str(sched.timezone) == "Europe/London"
+
+
+def test_build_scheduler_starts_paused() -> None:
+    """build_scheduler returns a configured but not-yet-running scheduler."""
+    sched = build_scheduler(timezone="Europe/London")
+    assert sched.running is False
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_scheduler_runner.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement scheduler module**
+
+`src/driftnote/scheduler/__init__.py`:
+
+```python
+"""Scheduler: APScheduler runner + concrete jobs."""
+```
+
+`src/driftnote/scheduler/runner.py`:
+
+```python
+"""Async APScheduler runner + a `job_run` context manager that records each
+scheduled invocation as a row in `job_runs` (running → ok|error|warn)."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Self
+from zoneinfo import ZoneInfo
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.repository.jobs import finish_job_run, record_job_run
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class _RunHandle:
+    """Returned by `job_run(...)`. Callers fill in `detail` / `error_kind`."""
+
+    _detail: str | None = None
+    _error_kind: str | None = None
+    _status: str = "ok"
+
+    def detail(self, text: str) -> None:
+        self._detail = text
+
+    def set_error_kind(self, kind: str) -> None:
+        self._error_kind = kind
+
+    def warn(self) -> None:
+        self._status = "warn"
+
+
+@contextmanager
+def job_run(engine: Engine, job: str) -> Iterator[_RunHandle]:
+    """Wrap one scheduled-job invocation. Records `running` on enter; on exit
+    records `ok`, `warn`, or `error` and captures any raised exception."""
+    started_at = _utcnow_iso()
+    with session_scope(engine) as session:
+        run_id = record_job_run(session, job=job, started_at=started_at)
+
+    handle = _RunHandle()
+    try:
+        yield handle
+    except BaseException as exc:
+        finished_at = _utcnow_iso()
+        with session_scope(engine) as session:
+            finish_job_run(
+                session,
+                run_id=run_id,
+                finished_at=finished_at,
+                status="error",
+                detail=handle._detail,
+                error_kind=handle._error_kind,
+                error_message=f"{type(exc).__name__}: {exc}"[:2000],
+            )
+        raise
+    else:
+        finished_at = _utcnow_iso()
+        with session_scope(engine) as session:
+            finish_job_run(
+                session,
+                run_id=run_id,
+                finished_at=finished_at,
+                status=handle._status,
+                detail=handle._detail,
+                error_kind=handle._error_kind,
+            )
+
+
+def build_scheduler(*, timezone: str) -> AsyncIOScheduler:
+    """Return a configured (but not started) AsyncIOScheduler in the given tz."""
+    tz = ZoneInfo(timezone)
+    return AsyncIOScheduler(timezone=tz)
+
+
+def cron(expr: str, tz: str) -> CronTrigger:
+    """Build a CronTrigger from a 5-field cron string in the given tz."""
+    minute, hour, day, month, day_of_week = expr.split()
+    return CronTrigger(
+        minute=minute,
+        hour=hour,
+        day=day,
+        month=month,
+        day_of_week=day_of_week,
+        timezone=ZoneInfo(tz),
+    )
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_scheduler_runner.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/scheduler/__init__.py src/driftnote/scheduler/runner.py tests/unit/test_scheduler_runner.py
+git commit -m "feat(scheduler): runner + job_run context manager + cron helper"
+```
+
+---
+
+### Task 7.3: `scheduler/prompt_job.py` — daily prompt sender
+
+**Files:**
+- Create: `src/driftnote/scheduler/prompt_job.py`
+- Create: `tests/integration/test_scheduler_prompt_job.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Integration test: the daily prompt job sends a prompt and records pending_prompts."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import date as _date
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.mail.transport import SmtpTransport
+from driftnote.repository.ingested import find_prompt_by_message_id
+from driftnote.scheduler.prompt_job import run_prompt_job
+from tests.conftest import MailServer
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def _smtp(mail_server: MailServer) -> SmtpTransport:
+    return SmtpTransport(
+        host=mail_server.host,
+        port=mail_server.smtp_port,
+        tls=False,
+        starttls=False,
+        username=mail_server.user,
+        password=mail_server.password,
+        sender_address=mail_server.address,
+        sender_name="Driftnote",
+    )
+
+
+def test_run_prompt_job_sends_and_anchors(mail_server: MailServer, engine: Engine) -> None:
+    smtp = _smtp(mail_server)
+    asyncio.run(
+        run_prompt_job(
+            engine=engine,
+            smtp=smtp,
+            recipient=mail_server.address,
+            subject_template="[Driftnote] How was {date}?",
+            body_template_text="Hi! Reply with `Mood: <emoji>` and your day. — {date}",
+            today=_date(2026, 5, 6),
+        )
+    )
+    with session_scope(engine) as session:
+        # We don't know the message-id ahead of time; look up by date instead.
+        from driftnote.models import PendingPrompt
+        from sqlalchemy import select
+        rec = session.scalar(select(PendingPrompt).where(PendingPrompt.date == "2026-05-06"))
+    assert rec is not None
+    msg_id = rec.message_id
+    found = find_prompt_by_message_id_via_engine(engine, msg_id)
+    assert found is not None
+    assert found.date == "2026-05-06"
+
+
+def find_prompt_by_message_id_via_engine(engine: Engine, mid: str):
+    from driftnote.repository.ingested import find_prompt_by_message_id
+    with session_scope(engine) as session:
+        return find_prompt_by_message_id(session, mid)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_scheduler_prompt_job.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/scheduler/prompt_job.py`**
+
+```python
+"""Daily prompt job: render and send the prompt; record pending_prompts row."""
+
+from __future__ import annotations
+
+from datetime import date as _date
+
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.mail.smtp import send_email
+from driftnote.mail.transport import SmtpTransport
+from driftnote.repository.ingested import record_pending_prompt
+
+
+async def run_prompt_job(
+    *,
+    engine: Engine,
+    smtp: SmtpTransport,
+    recipient: str,
+    subject_template: str,
+    body_template_text: str,
+    today: _date,
+) -> None:
+    """Render the prompt for `today`, send it via SMTP, and persist the
+    outgoing Message-ID as the date anchor for matching incoming replies."""
+    iso = today.isoformat()
+    subject = subject_template.format(date=iso)
+    body = body_template_text.format(date=iso)
+
+    message_id = await send_email(
+        smtp,
+        recipient=recipient,
+        subject=subject,
+        body_text=body,
+    )
+
+    with session_scope(engine) as session:
+        record_pending_prompt(
+            session,
+            date=iso,
+            message_id=message_id,
+            sent_at=_iso_now_utc(),
+        )
+
+
+def _iso_now_utc() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_scheduler_prompt_job.py -v`
+Expected: 1 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/scheduler/prompt_job.py tests/integration/test_scheduler_prompt_job.py
+git commit -m "feat(scheduler): daily prompt sender with pending_prompts anchor"
+```
+
+---
+
+### Task 7.4: `scheduler/poll_job.py` — IMAP poll → ingest
+
+**Files:**
+- Create: `src/driftnote/scheduler/poll_job.py`
+- Create: `tests/integration/test_scheduler_poll_job.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Integration test: poll job fetches UNSEEN, ingests, then moves to Processed."""
+
+from __future__ import annotations
+
+import asyncio
+import imaplib
+from datetime import date as _date
+from email.message import EmailMessage
+from email.utils import make_msgid
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.mail.transport import ImapTransport
+from driftnote.repository.entries import get_entry
+from driftnote.repository.ingested import (
+    get_ingested,
+    is_ingested,
+    record_pending_prompt,
+)
+from driftnote.scheduler.poll_job import run_poll_job
+from tests.conftest import MailServer
+
+
+def _imap(mail_server: MailServer) -> ImapTransport:
+    return ImapTransport(
+        host=mail_server.host,
+        port=mail_server.imap_port,
+        tls=False,
+        username=mail_server.user,
+        password=mail_server.password,
+        inbox_folder="INBOX",
+        processed_folder="INBOX.Processed",
+    )
+
+
+def _drop_reply(mail_server: MailServer, *, in_reply_to: str | None, body: str) -> str:
+    msg = EmailMessage()
+    msg["From"] = mail_server.address
+    msg["To"] = mail_server.address
+    msg["Subject"] = "Re: [Driftnote] How was 2026-05-06?"
+    msg["Message-ID"] = make_msgid(domain="example")
+    msg["Date"] = "Wed, 06 May 2026 21:30:15 +0000"
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    msg.set_content(body)
+
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.append("INBOX", "", imaplib.Time2Internaldate(0), msg.as_bytes())
+    mb.logout()
+    return msg["Message-ID"]
+
+
+@pytest.fixture(autouse=True)
+def _clean_mailbox(mail_server: MailServer):
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    for folder in ("INBOX", "INBOX.Processed"):
+        try:
+            mb.select(folder)
+            mb.store("1:*", "+FLAGS", r"\Deleted")
+            mb.expunge()
+        except Exception:
+            pass
+    try:
+        mb.create("INBOX.Processed")
+    except Exception:
+        pass
+    mb.logout()
+
+
+@pytest.fixture
+def engine_data(tmp_path: Path) -> tuple[Engine, Path]:
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    return eng, tmp_path / "data"
+
+
+def test_poll_ingests_message_and_moves_to_processed(mail_server: MailServer, engine_data) -> None:
+    engine, data_root = engine_data
+    with session_scope(engine) as session:
+        record_pending_prompt(
+            session, date="2026-05-06",
+            message_id="<prompt-2026-05-06@driftnote>", sent_at="2026-05-06T21:00:00Z",
+        )
+    mid = _drop_reply(
+        mail_server,
+        in_reply_to="<prompt-2026-05-06@driftnote>",
+        body="Mood: 💪\n\nGood day. #work",
+    )
+
+    from driftnote.config import (
+        BackupConfig, Config, DigestsConfig, DiskConfig, EmailConfig,
+        ParsingConfig, PromptConfig, ScheduleConfig, Secrets,
+    )
+    from pydantic import SecretStr
+
+    cfg = Config(
+        schedule=ScheduleConfig(
+            daily_prompt="0 21 * * *", weekly_digest="0 8 * * 1",
+            monthly_digest="0 8 1 * *", yearly_digest="0 8 1 1 *",
+            imap_poll="*/5 * * * *", timezone="Europe/London",
+        ),
+        email=EmailConfig(
+            imap_folder="INBOX", imap_processed_folder="INBOX.Processed",
+            recipient=mail_server.address, sender_name="Driftnote",
+            imap_host=mail_server.host, imap_port=mail_server.imap_port, imap_tls=False,
+            smtp_host="x", smtp_port=587, smtp_tls=False, smtp_starttls=False,
+        ),
+        prompt=PromptConfig(subject_template="x", body_template="t.j2"),
+        parsing=ParsingConfig(mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)", max_photos=4, max_videos=2),
+        digests=DigestsConfig(weekly_enabled=True, monthly_enabled=True, yearly_enabled=True),
+        backup=BackupConfig(retain_months=12, encrypt=False, age_key_path=""),
+        disk=DiskConfig(warn_percent=80, alert_percent=95, check_cron="0 */6 * * *", data_path=str(data_root)),
+        secrets=Secrets(
+            gmail_user=mail_server.user, gmail_app_password=SecretStr(mail_server.password),
+            cf_access_aud="aud", cf_team_domain="t.example.com",
+        ),
+    )
+
+    asyncio.run(run_poll_job(config=cfg, engine=engine, data_root=data_root, imap=_imap(mail_server)))
+
+    with session_scope(engine) as session:
+        entry = get_entry(session, "2026-05-06")
+        ing = get_ingested(session, mid)
+    assert entry is not None
+    assert ing is not None
+    assert ing.imap_moved == 1
+
+    # Message has moved out of Inbox into Processed.
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.select("INBOX")
+    typ, data = mb.search(None, "ALL")
+    assert data == [b""]  # empty INBOX
+    mb.select("INBOX.Processed")
+    typ, data = mb.search(None, "ALL")
+    assert data and data[0]
+    mb.logout()
+
+
+def test_poll_retries_imap_move_on_imap_moved_zero(mail_server: MailServer, engine_data, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If a previous poll ingested but failed to move, the next poll should
+    retry only the IMAP move without re-ingesting."""
+    engine, data_root = engine_data
+    with session_scope(engine) as session:
+        record_pending_prompt(
+            session, date="2026-05-06",
+            message_id="<prompt-2026-05-06@driftnote>", sent_at="t",
+        )
+    _drop_reply(mail_server, in_reply_to="<prompt-2026-05-06@driftnote>",
+                body="Mood: 💪\n\nrecovered #work")
+
+    # First call: succeed at ingest, simulate failure on move.
+    from driftnote.scheduler import poll_job as _poll
+
+    async def _fail_move(*args, **kwargs):
+        raise RuntimeError("simulated IMAP move failure")
+
+    real_move = _poll._move_to_processed
+    monkeypatch.setattr(_poll, "_move_to_processed", _fail_move)
+
+    from driftnote.config import (
+        BackupConfig, Config, DigestsConfig, DiskConfig, EmailConfig,
+        ParsingConfig, PromptConfig, ScheduleConfig, Secrets,
+    )
+    from pydantic import SecretStr
+
+    cfg = Config(
+        schedule=ScheduleConfig(
+            daily_prompt="0 21 * * *", weekly_digest="0 8 * * 1",
+            monthly_digest="0 8 1 * *", yearly_digest="0 8 1 1 *",
+            imap_poll="*/5 * * * *", timezone="Europe/London",
+        ),
+        email=EmailConfig(
+            imap_folder="INBOX", imap_processed_folder="INBOX.Processed",
+            recipient=mail_server.address, sender_name="Driftnote",
+            imap_host=mail_server.host, imap_port=mail_server.imap_port, imap_tls=False,
+            smtp_host="x", smtp_port=587, smtp_tls=False, smtp_starttls=False,
+        ),
+        prompt=PromptConfig(subject_template="x", body_template="t.j2"),
+        parsing=ParsingConfig(mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)", max_photos=4, max_videos=2),
+        digests=DigestsConfig(weekly_enabled=True, monthly_enabled=True, yearly_enabled=True),
+        backup=BackupConfig(retain_months=12, encrypt=False, age_key_path=""),
+        disk=DiskConfig(warn_percent=80, alert_percent=95, check_cron="0 */6 * * *", data_path=str(data_root)),
+        secrets=Secrets(
+            gmail_user=mail_server.user, gmail_app_password=SecretStr(mail_server.password),
+            cf_access_aud="aud", cf_team_domain="t.example.com",
+        ),
+    )
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_poll_job(config=cfg, engine=engine, data_root=data_root, imap=_imap(mail_server)))
+
+    # imap_moved still 0
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import pending_imap_moves
+        pending = pending_imap_moves(session)
+    assert len(pending) == 1
+
+    # Second call: restore real move, message should be moved without re-ingesting.
+    monkeypatch.setattr(_poll, "_move_to_processed", real_move)
+    asyncio.run(run_poll_job(config=cfg, engine=engine, data_root=data_root, imap=_imap(mail_server)))
+
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import pending_imap_moves
+        pending = pending_imap_moves(session)
+    assert pending == []
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_scheduler_poll_job.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/scheduler/poll_job.py`**
+
+```python
+"""IMAP poll job: fetch UNSEEN replies, ingest each, then move to Processed.
+
+Two paths:
+- Normal: per-message UNSEEN → ingest → IMAP-move → set imap_moved=1.
+- Retry: at job start, drain any rows with imap_moved=0 from prior polls and
+  attempt the IMAP move again. This implements the spec §3.B retry path
+  cleanly without the ingest pipeline needing to know about it.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import Engine
+
+from driftnote.config import Config
+from driftnote.db import session_scope
+from driftnote.ingest.pipeline import ingest_one
+from driftnote.mail.imap import RawMessage, move_to_processed as _move_to_processed, poll_unseen
+from driftnote.mail.transport import ImapTransport
+from driftnote.repository.ingested import (
+    is_ingested,
+    mark_imap_moved,
+    pending_imap_moves,
+)
+
+
+async def run_poll_job(
+    *,
+    config: Config,
+    engine: Engine,
+    data_root: Path,
+    imap: ImapTransport,
+) -> None:
+    # Step 1: retry any prior IMAP-move failures.
+    with session_scope(engine) as session:
+        retry_targets = pending_imap_moves(session)
+    for row in retry_targets:
+        await _move_to_processed(imap, message_id=row.message_id)
+        with session_scope(engine) as session:
+            mark_imap_moved(session, row.message_id)
+
+    # Step 2: poll new UNSEEN messages.
+    async for raw_msg in poll_unseen(imap):
+        await _handle_one(raw_msg, config=config, engine=engine, data_root=data_root, imap=imap)
+
+
+async def _handle_one(
+    raw_msg: RawMessage,
+    *,
+    config: Config,
+    engine: Engine,
+    data_root: Path,
+    imap: ImapTransport,
+) -> None:
+    # Idempotency check upfront — if already ingested, skip directly to IMAP move
+    # (the ingest pipeline also no-ops, but this avoids re-parsing).
+    with session_scope(engine) as session:
+        already = is_ingested(session, raw_msg.message_id)
+
+    if not already:
+        ingest_one(
+            raw=raw_msg.raw_bytes,
+            config=config,
+            engine=engine,
+            data_root=data_root,
+            received_at=datetime.now(tz=timezone.utc),
+        )
+
+    await _move_to_processed(imap, message_id=raw_msg.message_id)
+    with session_scope(engine) as session:
+        mark_imap_moved(session, raw_msg.message_id)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_scheduler_poll_job.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/scheduler/poll_job.py tests/integration/test_scheduler_poll_job.py
+git commit -m "feat(scheduler): IMAP poll → ingest → move job with retry path"
+```
+
+---
+
+### Task 7.5: `scheduler/disk_job.py` — disk-usage check + threshold alerts
+
+**Files:**
+- Create: `src/driftnote/scheduler/disk_job.py`
+- Create: `tests/unit/test_scheduler_disk_job.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for disk-usage threshold tracking + alert triggering."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.alerts import AlertSender
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.ingested import (
+    clear_threshold_crossed,
+    get_threshold_crossed_at,
+    record_threshold_crossed,
+)
+from driftnote.repository.jobs import last_run
+from driftnote.scheduler.disk_job import run_disk_check
+
+
+class _FakeSender(AlertSender):
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+
+    async def send(self, *, kind: str, subject: str, body: str) -> None:
+        self.sent.append((kind, subject, body))
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def test_disk_check_no_alert_below_warn(engine: Engine) -> None:
+    sender = _FakeSender()
+    asyncio.run(
+        run_disk_check(
+            engine=engine,
+            sender=sender,
+            data_path="/",
+            warn_percent=80,
+            alert_percent=95,
+            measure=lambda _path: (1_000, 5_000),  # 20% used
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    assert sender.sent == []
+
+
+def test_disk_check_alerts_on_warn_crossing(engine: Engine) -> None:
+    sender = _FakeSender()
+    asyncio.run(
+        run_disk_check(
+            engine=engine,
+            sender=sender,
+            data_path="/",
+            warn_percent=80,
+            alert_percent=95,
+            measure=lambda _path: (8_500, 10_000),  # 85%
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    assert len(sender.sent) == 1
+    assert sender.sent[0][0] == "disk_warn"
+
+
+def test_disk_check_does_not_realert_after_warn_already_crossed(engine: Engine) -> None:
+    sender = _FakeSender()
+    with session_scope(engine) as session:
+        record_threshold_crossed(session, threshold=80, at="2026-05-05T08:00:00Z")
+    asyncio.run(
+        run_disk_check(
+            engine=engine,
+            sender=sender,
+            data_path="/",
+            warn_percent=80,
+            alert_percent=95,
+            measure=lambda _path: (8_500, 10_000),
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    assert sender.sent == []
+
+
+def test_disk_check_clears_warn_state_after_drop_below(engine: Engine) -> None:
+    sender = _FakeSender()
+    with session_scope(engine) as session:
+        record_threshold_crossed(session, threshold=80, at="2026-05-05T08:00:00Z")
+    asyncio.run(
+        run_disk_check(
+            engine=engine,
+            sender=sender,
+            data_path="/",
+            warn_percent=80,
+            alert_percent=95,
+            measure=lambda _path: (5_000, 10_000),
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    with session_scope(engine) as session:
+        assert get_threshold_crossed_at(session, 80) is None
+
+
+def test_disk_check_records_job_run_with_detail(engine: Engine) -> None:
+    sender = _FakeSender()
+    asyncio.run(
+        run_disk_check(
+            engine=engine,
+            sender=sender,
+            data_path="/",
+            warn_percent=80,
+            alert_percent=95,
+            measure=lambda _path: (8_500, 10_000),
+            now="2026-05-06T22:00:00Z",
+        )
+    )
+    with session_scope(engine) as session:
+        row = last_run(session, "disk_check")
+    assert row is not None
+    assert row.status == "ok"
+    assert row.detail is not None
+    assert "8500" in row.detail
+    assert "10000" in row.detail
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_scheduler_disk_job.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/scheduler/disk_job.py`**
+
+```python
+"""Disk-usage check job: measure usage, manage threshold-state edges, alert on crossing."""
+
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import Callable
+
+from sqlalchemy import Engine
+
+from driftnote.alerts import AlertSender, dispatch_alert
+from driftnote.db import session_scope
+from driftnote.repository.ingested import (
+    clear_threshold_crossed,
+    get_threshold_crossed_at,
+    record_threshold_crossed,
+)
+from driftnote.repository.jobs import finish_job_run, record_job_run
+
+DiskMeasure = Callable[[str], tuple[int, int]]
+"""Returns (used_bytes, total_bytes) for the given path. Defaults to shutil.disk_usage."""
+
+
+def _default_measure(path: str) -> tuple[int, int]:
+    usage = shutil.disk_usage(path)
+    return usage.used, usage.total
+
+
+async def run_disk_check(
+    *,
+    engine: Engine,
+    sender: AlertSender,
+    data_path: str,
+    warn_percent: int,
+    alert_percent: int,
+    measure: DiskMeasure | None = None,
+    now: str,
+) -> None:
+    measure_fn = measure or _default_measure
+    used, total = measure_fn(data_path)
+    percent = (used / total) * 100 if total else 0.0
+    detail = json.dumps({"used_bytes": used, "total_bytes": total, "percent": round(percent, 2)})
+
+    with session_scope(engine) as session:
+        run_id = record_job_run(session, job="disk_check", started_at=now)
+
+    try:
+        await _maybe_alert(
+            engine=engine, sender=sender,
+            threshold=warn_percent, kind="disk_warn",
+            percent=percent, used=used, total=total, now=now,
+        )
+        await _maybe_alert(
+            engine=engine, sender=sender,
+            threshold=alert_percent, kind="disk_alert",
+            percent=percent, used=used, total=total, now=now,
+        )
+    except Exception as exc:
+        with session_scope(engine) as session:
+            finish_job_run(
+                session, run_id=run_id, finished_at=now, status="error",
+                detail=detail, error_kind="disk_check", error_message=str(exc)[:2000],
+            )
+        raise
+
+    with session_scope(engine) as session:
+        finish_job_run(session, run_id=run_id, finished_at=now, status="ok", detail=detail)
+
+
+async def _maybe_alert(
+    *,
+    engine: Engine,
+    sender: AlertSender,
+    threshold: int,
+    kind: str,
+    percent: float,
+    used: int,
+    total: int,
+    now: str,
+) -> None:
+    with session_scope(engine) as session:
+        prior = get_threshold_crossed_at(session, threshold)
+
+    if percent >= threshold:
+        if prior is not None:
+            return  # already alerted; don't re-alert until the level drops below
+        with session_scope(engine) as session:
+            record_threshold_crossed(session, threshold=threshold, at=now)
+        await dispatch_alert(
+            engine=engine,
+            sender=sender,
+            kind=kind,
+            subject=f"Driftnote disk usage at {percent:.1f}%",
+            body=f"used={used}B total={total}B percent={percent:.1f}% threshold={threshold}%",
+            now=now,
+        )
+    else:
+        if prior is not None:
+            with session_scope(engine) as session:
+                clear_threshold_crossed(session, threshold)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_scheduler_disk_job.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/scheduler/disk_job.py tests/unit/test_scheduler_disk_job.py
+git commit -m "feat(scheduler): disk-usage threshold check with stateful alerts"
+```
+
+---
+
+### Chunk 7 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–7 tests pass: `uv run pytest -v`.
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] 5 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** Chunk 8 (digest rendering) and Chunk 9 (web layer) can be developed in parallel from the end of Chunk 7. Chunk 8 also adds `scheduler/digest_jobs.py` since renderer + scheduler binding is one logical unit.
