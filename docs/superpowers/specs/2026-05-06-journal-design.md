@@ -93,8 +93,7 @@ A single Python process on the RPi (Podman container) handles HTTP, scheduling, 
 │   │           ├── IMG_4521.jpg      ← 320px
 │   │           └── VID_4522.jpg      ← ffmpeg poster frame at ~1s
 │   └── index.sqlite                  ← derived, rebuildable
-├── backups/journal-2026-04.tar.zst
-└── logs/                             ← rotated journald output
+└── backups/journal-2026-04.tar.zst
 ```
 
 ### `entry.md` format
@@ -127,9 +126,12 @@ Forgot to mention — made a decent risotto. #cooking
 
 ### SQLite schema (derived index)
 
+`entries` uses an explicit `INTEGER PRIMARY KEY` rowid (so FTS5 can use `content_rowid`) plus a `UNIQUE` constraint on `date`. All foreign keys reference `entries.date` rather than `entries.id`, since `date` is the natural key for the rest of the schema.
+
 ```sql
 CREATE TABLE entries (
-  date          TEXT PRIMARY KEY,         -- 'YYYY-MM-DD'
+  id            INTEGER PRIMARY KEY,       -- FTS5 rowid; not exposed in app DTOs
+  date          TEXT NOT NULL UNIQUE,      -- 'YYYY-MM-DD' (natural key)
   mood          TEXT,                      -- single emoji or NULL
   body_text     TEXT NOT NULL,             -- plain text from markdown body, for FTS
   body_md       TEXT NOT NULL,             -- raw markdown body (no frontmatter)
@@ -158,24 +160,28 @@ CREATE TABLE ingested_messages (
   message_id  TEXT PRIMARY KEY,            -- email Message-ID header
   date        TEXT NOT NULL REFERENCES entries(date),
   eml_path    TEXT NOT NULL,               -- relative to entry dir
-  ingested_at TEXT NOT NULL
+  ingested_at TEXT NOT NULL,
+  imap_moved  INTEGER NOT NULL DEFAULT 0   -- 0 = still in Inbox; 1 = moved to Processed
 );
+CREATE INDEX idx_ingested_imap_moved ON ingested_messages(imap_moved) WHERE imap_moved = 0;
 
 CREATE TABLE pending_prompts (
   date         TEXT PRIMARY KEY,
   message_id   TEXT NOT NULL UNIQUE,       -- outgoing prompt's Message-ID
   sent_at      TEXT NOT NULL
 );
+-- Rows are kept indefinitely; they are tiny (one per day) and serve to anchor
+-- replies to the right date. Pruning is deferred to a future maintenance task.
 
 CREATE TABLE job_runs (
-  id            INTEGER PRIMARY KEY,
-  job           TEXT NOT NULL,
-  started_at    TEXT NOT NULL,
-  finished_at   TEXT,
-  status        TEXT NOT NULL,             -- 'running'|'ok'|'warn'|'error'
-  detail        TEXT,
-  error_kind    TEXT,
-  error_message TEXT,
+  id              INTEGER PRIMARY KEY,
+  job             TEXT NOT NULL,
+  started_at      TEXT NOT NULL,
+  finished_at     TEXT,
+  status          TEXT NOT NULL,           -- 'running'|'ok'|'warn'|'error'
+  detail          TEXT,                    -- JSON-encoded; see §6 for shape per job
+  error_kind      TEXT,
+  error_message   TEXT,
   acknowledged_at TEXT
 );
 CREATE INDEX idx_job_runs_job_started ON job_runs(job, started_at DESC);
@@ -186,7 +192,7 @@ CREATE TABLE disk_state (
 );
 
 CREATE VIRTUAL TABLE entries_fts USING fts5(
-  body_text, content='entries', content_rowid='rowid'
+  body_text, content='entries', content_rowid='id'
 );
 -- triggers keep entries_fts in sync with entries (standard FTS5 pattern)
 ```
@@ -208,14 +214,18 @@ SQLite runs in **WAL mode** with a 5s busy-handler so the host-side backup scrip
 
 1. Connect IMAPS to `Journal/Inbox`, search `UNSEEN`.
 2. For each message:
-   a. Read `Message-ID`. Skip if already in `ingested_messages` (idempotency).
-   b. Read `In-Reply-To`. If it matches a row in `pending_prompts`, the entry's date is that prompt's date. Otherwise use the message's `Date` header (in configured timezone) and log a warning.
+   a. Read `Message-ID`. If already in `ingested_messages` and `imap_moved=1`, skip entirely. If already in `ingested_messages` and `imap_moved=0`, skip steps b–f and jump straight to step g (IMAP move retry — see step 3).
+   b. Read `In-Reply-To`. If it matches a row in `pending_prompts`, the entry's date is that prompt's date. Otherwise use the message's `Date` header (in configured timezone) and log a warning. (`restore-imap` exercises this fallback for replies whose original prompt rows have been pruned.)
    c. Strip quoted text (heuristic: lines after `On … wrote:` plus `>`-prefixed lines).
    d. Extract: mood (configured regex), tags (configured regex), body, attachments.
-   e. Create `data/entries/YYYY/MM/DD/` if absent. Write `raw/<received-utc>.eml` (full original bytes). Save attachments to `originals/`. Generate `web/` and `thumbs/` derivatives. Append-or-create `entry.md` (regenerate frontmatter; append body section with `---` separator if entry already exists).
-   f. Upsert SQLite: `entries`, `tags`, `media`, `ingested_messages`.
-   g. IMAP: copy message to `Journal/Processed`, mark deleted in `Journal/Inbox`, EXPUNGE.
-3. On any per-message failure: roll back filesystem writes for that message (no `entry.md` mutation, no `raw.eml` written, no SQLite row), leave the message UNSEEN in `Journal/Inbox`, log error with `Message-ID`, continue with next message.
+   e. Create `data/entries/YYYY/MM/DD/` if absent. Write `raw/<received-utc>.eml` (full original bytes). Save attachments to `originals/`. Generate `web/` and `thumbs/` derivatives. Append-or-create `entry.md`:
+      - **`created_at`** = earliest source's received-time (preserved across appends).
+      - **`updated_at`** = latest source's received-time (advanced on each append).
+      - **`sources`** = chronological list of `raw/*.eml` filenames.
+      - **Body** = concatenation of parsed sections from each source, separated by `---`.
+   f. Upsert SQLite: `entries`, `tags`, `media`, `ingested_messages` (with `imap_moved=0`).
+   g. IMAP: copy message to `Journal/Processed`, mark deleted in `Journal/Inbox`, EXPUNGE. On success, set `ingested_messages.imap_moved=1`.
+3. On any per-message failure during steps b–f: roll back filesystem writes for that message (no `entry.md` mutation, no `raw.eml` written, no SQLite row), leave the message UNSEEN in `Journal/Inbox`, log error with `Message-ID`, continue with next message. On step-g failure: filesystem and SQLite already reflect ingestion, but `imap_moved=0` flags the message for an IMAP-only retry on the next poll (the step-2a guard reaches step g without re-running ingestion).
 
 ### C. Web UI
 
@@ -236,7 +246,7 @@ All routes (in non-dev) require valid `Cf-Access-Jwt-Assertion` header verified 
 Each digest type independently enabled in config. Cron defaults: weekly Mon 08:00, monthly 1st 08:00, yearly Jan 1 08:00.
 
 - **Weekly:** subject `[Journal] Week of Mon DD MMM → Sun DD MMM`. 7-emoji moodboard row. Per-day section with date heading, emoji, body HTML, inline thumbnails (CID-attached, link to web UI for full-size). Tag chips footer.
-- **Monthly:** subject `[Journal] Month YYYY`. Calendar-grid moodboard (rows = weeks). Stats line (entries / total days, top emoji, top tags). 4–6 highlight days picked by heuristic: days with photos *and* at least one rare tag (used <3 times that month). Each highlight: date, emoji, first ~2 sentences, one inline thumbnail. Link to web UI for full month.
+- **Monthly:** subject `[Journal] Month YYYY`. Calendar-grid moodboard (rows = weeks). Stats line (entries / total days, top emoji, top tags). Up to 6 highlight days, target minimum 4. Selection is progressive: first take days that have photos *and* at least one rare tag (used <3 times that month); if fewer than 4 qualify, relax to days with photos *or* a rare tag; if still fewer than 4, fall back to the days with the most photos. Emit whatever count results — there is no padding with empty highlights. Each highlight: date, emoji, first ~2 sentences, one inline thumbnail. Link to web UI for full month.
 - **Yearly:** subject `[Journal] YYYY in review`. GitHub-style 52-week × 7-day emoji grid. Stats: total entries, longest streak, top 10 emojis, top 10 tags. One photo per month (most-tagged day's first photo, fallback to any photo). Link to web UI.
 
 Each digest run records a `job_runs` row.
@@ -280,7 +290,9 @@ Volume=/var/journal:/var/journal:Z
 Environment=JOURNAL_CONFIG=/var/journal/config.toml
 EnvironmentFile=/etc/journal/journal.env
 PublishPort=127.0.0.1:8000:8000
-Exec=uvicorn journal.app:app --host 0.0.0.0 --port 8000
+# Command line comes from the image's CMD (uvicorn journal.app:app --host 0.0.0.0 --port 8000).
+# Quadlet directive names vary across podman versions; verify with `man podman-systemd.unit`
+# on the deployment host.
 
 [Service]
 Restart=on-failure
@@ -413,7 +425,7 @@ After every prod deploy: send a test email with mood + photo, watch logs, verify
 
 ### Logging
 
-Structured JSON to stdout (`structlog`); journald captures via systemd. Each line carries `event`, `date`, `message_id` (where relevant), `error_kind`, `request_id` for HTTP.
+Structured JSON to stdout (`structlog`); journald captures via systemd. Each line carries `event`, `date`, `message_id` (where relevant), `error_kind`, `request_id` for HTTP. Log retention and rotation are delegated to the host's journald configuration (`SystemMaxUse`, `MaxRetentionSec` in `/etc/systemd/journald.conf`); the app does not write to a private log directory.
 
 ### Failure matrix
 
@@ -453,7 +465,8 @@ Structured JSON to stdout (`structlog`); journald captures via systemd. Each lin
 ### Disk monitoring
 
 - Job `disk_check` runs per `disk.check_cron` (default every 6h). `shutil.disk_usage("/var/journal/data")`.
-- On crossing 80% (transition from below), self-email **once** with current usage and projected days-remaining (linear extrapolation from last 30 days of growth). State tracked via `disk_state` table; re-alert only after dropping back below the threshold.
+- Each run records `{"used_bytes": ..., "total_bytes": ..., "percent": ...}` as JSON in `job_runs.detail`. Growth is computed by querying `job_runs` for `disk_check` rows in the trailing 30 days and fitting a simple linear regression on `(started_at, used_bytes)`.
+- On crossing 80% (transition from below), self-email **once** with current usage and the projected days-remaining from the regression. State tracked via `disk_state` table; re-alert only after dropping back below the threshold.
 - On 95% crossing, second email with stronger subject.
 - Both thresholds also surface in admin panel.
 
@@ -467,7 +480,7 @@ All self-emails (IMAP failure, disk threshold, backup failure) check `job_runs` 
   - Default: walk `data/entries/`, parse every `entry.md`, rebuild `index.sqlite` from scratch.
   - `--from-raw`: also re-derive `entry.md` content from `raw/*.eml` (overwrites manual UI edits — requires `--force` if any entry has `updated_at > created_at`).
 - `journal restore-imap --since=YYYY-MM-DD [--until=YYYY-MM-DD]`
-  - Fetch matching emails from configured IMAP folders (Inbox + Processed); run them through normal ingestion. Idempotent via `ingested_messages`.
+  - Fetch matching emails from configured IMAP folders (`Journal/Inbox` + `Journal/Processed`); run them through normal ingestion. Idempotent via `ingested_messages`. Old replies whose `pending_prompts` rows have been pruned will hit the §3.B step-2b fallback (entry date taken from message `Date` header) — this is expected behavior, not a bug.
 - `journal send-prompt [--date=YYYY-MM-DD]`
   - Manual trigger of a prompt for a given date (default: today). Useful if the scheduled job missed.
 
