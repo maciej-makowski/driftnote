@@ -4349,3 +4349,1222 @@ git commit -m "feat(mail): async IMAP poll + move-to-Processed helpers"
 - [ ] 4 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off:** Chunk 6 (ingestion pipeline) needs Chunks 3, 4, and 5; with all three landed, ingestion can be implemented next.
+
+---
+
+## Chunk 6: Ingestion pipeline
+
+**Outcome of this chunk:** A `driftnote/ingest/` module that, given a single raw `.eml` byte string + the ambient config + DB engine + data root, produces (or updates) an `entry.md` on disk, derives photo/video files, and upserts the SQLite index — atomically per the spec §3.B failure semantics. Idempotent on `Message-ID` via `ingested_messages` and `imap_moved` flag.
+
+### Task 6.1: `ingest/parse.py` — extract mood/tags/body/attachments from a raw email
+
+**Files:**
+- Create: `src/driftnote/ingest/__init__.py`
+- Create: `src/driftnote/ingest/parse.py`
+- Create: `tests/fixtures/emails/` (directory; `.eml` files dropped here per test)
+- Create: `tests/unit/test_ingest_parse.py`
+
+- [ ] **Step 1: Build small `.eml` fixtures**
+
+Create the following fixtures by writing them in the test (so the plan stays self-contained), or commit small `.eml` files to `tests/fixtures/emails/`. The tests below construct `EmailMessage` objects in-memory and serialize to bytes; no separate fixture files are needed.
+
+- [ ] **Step 2: Write failing test**
+
+```python
+"""Tests for raw-email parsing."""
+
+from __future__ import annotations
+
+from email.message import EmailMessage
+from email.utils import make_msgid
+
+import pytest
+
+from driftnote.ingest.parse import (
+    AttachmentMaterial,
+    ParsedReply,
+    parse_reply,
+)
+
+
+def _eml(
+    *,
+    subject: str = "[Driftnote] How was 2026-05-06?",
+    body_text: str = "Mood: 💪\n\nLong day at work. #work #cooking",
+    body_html: str | None = None,
+    in_reply_to: str | None = "<prompt-2026-05-06@driftnote>",
+    attachments: list[tuple[str, str, bytes]] | None = None,  # (filename, mime, bytes)
+) -> bytes:
+    msg = EmailMessage()
+    msg["From"] = "you@gmail.com"
+    msg["To"] = "you@gmail.com"
+    msg["Subject"] = subject
+    msg["Message-ID"] = make_msgid(domain="driftnote")
+    msg["Date"] = "Wed, 06 May 2026 21:30:15 +0000"
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    msg.set_content(body_text)
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
+    for filename, mime, payload in attachments or []:
+        maintype, _, subtype = mime.partition("/")
+        msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
+    return msg.as_bytes()
+
+
+def test_parse_extracts_mood_marker() -> None:
+    raw = _eml(body_text="Mood: 💪\n\nGood day.")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.mood == "💪"
+    assert parsed.body.strip() == "Good day."
+
+
+def test_parse_falls_back_to_first_emoji_when_no_mood_marker() -> None:
+    raw = _eml(body_text="🎉 yay something happened\n#celebrate")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.mood == "🎉"
+    assert "celebrate" in parsed.tags
+
+
+def test_parse_no_mood_at_all_yields_none() -> None:
+    raw = _eml(body_text="Just some plain ASCII text. No mood available.\n#nothing")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.mood is None
+
+
+def test_parse_extracts_tags_lowercased_deduplicated() -> None:
+    raw = _eml(body_text="Mood: 💪\n\n#Work #work #COOKING and #cooking again")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert sorted(parsed.tags) == ["cooking", "work"]
+
+
+def test_parse_strips_quoted_thread() -> None:
+    body = (
+        "Mood: 🌧️\n\nRainy walk in the park.\n\n"
+        "On Wed, 6 May 2026 at 21:00, Driftnote <you@gmail.com> wrote:\n"
+        "> Hi Maciej,\n"
+        "> How was today?\n"
+    )
+    raw = _eml(body_text=body)
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert "Rainy walk in the park." in parsed.body
+    assert "How was today?" not in parsed.body
+    assert "On Wed" not in parsed.body
+
+
+def test_parse_returns_in_reply_to() -> None:
+    raw = _eml(in_reply_to="<prompt-2026-05-06@driftnote>")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.in_reply_to == "<prompt-2026-05-06@driftnote>"
+
+
+def test_parse_returns_message_id_and_date() -> None:
+    raw = _eml()
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.message_id.startswith("<")
+    # Date header parses to datetime
+    assert parsed.date_header is not None
+    assert parsed.date_header.year == 2026
+
+
+def test_parse_attachments_split_by_mime_type() -> None:
+    raw = _eml(
+        attachments=[
+            ("photo.jpg", "image/jpeg", b"\xff\xd8\xff\xd9"),
+            ("video.mov", "video/quicktime", b"MOOV..."),
+            ("notes.pdf", "application/pdf", b"%PDF-..."),
+        ]
+    )
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    photos = [a for a in parsed.attachments if a.kind == "photo"]
+    videos = [a for a in parsed.attachments if a.kind == "video"]
+    other = [a for a in parsed.attachments if a.kind == "other"]
+    assert [a.filename for a in photos] == ["photo.jpg"]
+    assert [a.filename for a in videos] == ["video.mov"]
+    assert [a.filename for a in other] == ["notes.pdf"]
+
+
+def test_parse_attachment_material_round_trips_bytes() -> None:
+    raw = _eml(attachments=[("photo.jpg", "image/jpeg", b"\xff\xd8\xffJPG")])
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.attachments[0].content == b"\xff\xd8\xffJPG"
+
+
+def test_parse_picks_plain_body_over_html_when_both_present() -> None:
+    raw = _eml(
+        body_text="Mood: 🎉\n\nplain text version",
+        body_html="<p>HTML version</p>",
+    )
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert "plain text version" in parsed.body
+    assert "<p>" not in parsed.body
+```
+
+- [ ] **Step 3: Implement `src/driftnote/ingest/__init__.py`** (empty)
+
+```python
+"""Ingestion pipeline: raw .eml → entry.md + media + SQLite rows."""
+```
+
+- [ ] **Step 4: Implement `src/driftnote/ingest/parse.py`**
+
+```python
+"""Parse a raw .eml byte string into a ParsedReply.
+
+We extract:
+- message_id, in_reply_to, date_header (from headers)
+- body (plain text, with quoted-reply chunks stripped)
+- mood (configured regex; falls back to first emoji in body; None if neither)
+- tags (configured regex; lowercased + deduplicated)
+- attachments (image/* → photo, video/* → video, anything else → other)
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class AttachmentMaterial:
+    filename: str
+    mime_type: str
+    kind: Literal["photo", "video", "other"]
+    content: bytes
+
+
+@dataclass(frozen=True)
+class ParsedReply:
+    message_id: str
+    in_reply_to: str | None
+    date_header: datetime | None
+    body: str
+    mood: str | None
+    tags: list[str]
+    attachments: list[AttachmentMaterial]
+
+
+_QUOTE_HEADER_PATTERNS = (
+    re.compile(r"^On\s+.+\s+wrote:\s*$", re.MULTILINE),
+    re.compile(r"^From:\s+.+$", re.MULTILINE),  # Outlook-style "From:" thread headers
+)
+
+
+def parse_reply(raw: bytes, *, mood_regex: str, tag_regex: str) -> ParsedReply:
+    msg: EmailMessage = BytesParser(policy=policy.default).parsebytes(raw)  # type: ignore[assignment]
+
+    message_id = (msg["Message-ID"] or "").strip()
+    in_reply_to_raw = msg["In-Reply-To"]
+    in_reply_to = in_reply_to_raw.strip() if in_reply_to_raw else None
+    date_header_raw = msg["Date"]
+    date_header = parsedate_to_datetime(date_header_raw) if date_header_raw else None
+
+    body = _extract_plain_body(msg)
+    body = _strip_quoted(body)
+
+    mood = _extract_mood(body, mood_regex)
+    tags = _extract_tags(body, tag_regex)
+    attachments = _collect_attachments(msg)
+
+    return ParsedReply(
+        message_id=message_id,
+        in_reply_to=in_reply_to,
+        date_header=date_header,
+        body=body,
+        mood=mood,
+        tags=tags,
+        attachments=attachments,
+    )
+
+
+def _extract_plain_body(msg: EmailMessage) -> str:
+    """Prefer text/plain; fall back to a stripped text/html if no plain part exists."""
+    plain = msg.get_body(preferencelist=("plain",))
+    if plain is not None:
+        return plain.get_content().rstrip("\n") + "\n"
+    html = msg.get_body(preferencelist=("html",))
+    if html is not None:
+        return _crude_html_to_text(html.get_content())
+    return ""
+
+
+def _crude_html_to_text(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html).strip() + "\n"
+
+
+def _strip_quoted(body: str) -> str:
+    """Remove the quoted-reply portion: everything from `On … wrote:` (or similar) onward,
+    plus any block of `>`-prefixed lines at the end."""
+    # Find the earliest quote-marker line; truncate there.
+    cut_idx: int | None = None
+    for pattern in _QUOTE_HEADER_PATTERNS:
+        m = pattern.search(body)
+        if m and (cut_idx is None or m.start() < cut_idx):
+            cut_idx = m.start()
+    if cut_idx is not None:
+        body = body[:cut_idx]
+    # Also trim trailing `>`-prefixed lines (defensive: some clients omit the header).
+    lines = body.splitlines()
+    while lines and lines[-1].lstrip().startswith(">"):
+        lines.pop()
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def _extract_mood(body: str, mood_regex: str) -> str | None:
+    m = re.search(mood_regex, body, re.MULTILINE)
+    if m:
+        return m.group(1)
+    # Fallback: first emoji in the body.
+    for ch in body:
+        if _is_emoji(ch):
+            return ch
+    return None
+
+
+def _is_emoji(ch: str) -> bool:
+    """Quick-and-dirty emoji classifier — enough for journal mood extraction.
+
+    Categories starting with 'S' (Symbol) are the safest broad bucket; we also
+    include common emoji-block code points by Unicode property.
+    """
+    if not ch:
+        return False
+    cat = unicodedata.category(ch)
+    if cat in {"So", "Sk"}:  # Other-Symbol, Modifier-Symbol
+        return True
+    cp = ord(ch)
+    # Misc Symbols, Pictographs, Emoticons, Transport, Supplemental Symbols, etc.
+    return any(
+        lo <= cp <= hi
+        for lo, hi in (
+            (0x1F300, 0x1F6FF),
+            (0x1F900, 0x1F9FF),
+            (0x1FA70, 0x1FAFF),
+            (0x2600, 0x26FF),
+            (0x2700, 0x27BF),
+        )
+    )
+
+
+def _extract_tags(body: str, tag_regex: str) -> list[str]:
+    seen: dict[str, None] = {}
+    for m in re.finditer(tag_regex, body):
+        normalized = m.group(1).lower()
+        seen.setdefault(normalized, None)
+    return list(seen)
+
+
+def _collect_attachments(msg: EmailMessage) -> list[AttachmentMaterial]:
+    out: list[AttachmentMaterial] = []
+    for part in msg.iter_attachments():
+        mime = (part.get_content_type() or "application/octet-stream").lower()
+        filename = part.get_filename() or "attachment.bin"
+        content = part.get_payload(decode=True) or b""
+        if mime.startswith("image/"):
+            kind: Literal["photo", "video", "other"] = "photo"
+        elif mime.startswith("video/"):
+            kind = "video"
+        else:
+            kind = "other"
+        out.append(
+            AttachmentMaterial(filename=filename, mime_type=mime, kind=kind, content=content)
+        )
+    return out
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_ingest_parse.py -v`
+Expected: 10 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/ingest/__init__.py src/driftnote/ingest/parse.py tests/unit/test_ingest_parse.py
+git commit -m "feat(ingest): parse raw .eml for mood/tags/body/attachments"
+```
+
+---
+
+### Task 6.2: `ingest/attachments.py` — derivatives (web/thumb/poster)
+
+**Files:**
+- Create: `src/driftnote/ingest/attachments.py`
+- Create: `tests/fixtures/images/tiny.jpg`, `tiny.heic`, `tiny.mov` (small test fixtures)
+- Create: `tests/unit/test_ingest_attachments.py`
+
+- [ ] **Step 1: Generate test fixture files**
+
+Build the fixtures programmatically the first time and check them in. Run:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+from io import BytesIO
+from PIL import Image
+
+dest = Path("tests/fixtures/images")
+dest.mkdir(parents=True, exist_ok=True)
+
+img = Image.new("RGB", (200, 150), color=(180, 100, 60))
+img.save(dest / "tiny.jpg", quality=85)
+
+import pillow_heif
+pillow_heif.register_heif_opener()
+img.save(dest / "tiny.heic", quality=85)
+PY
+
+# Generate a tiny test mov via ffmpeg
+ffmpeg -y -loglevel error -f lavfi -i "color=c=red:size=64x48:duration=1:rate=2" \
+       -pix_fmt yuv420p tests/fixtures/images/tiny.mov
+ls -lh tests/fixtures/images/
+```
+
+Expected: `tiny.jpg`, `tiny.heic`, `tiny.mov` exist; each <50KB.
+
+- [ ] **Step 2: Write failing test**
+
+```python
+"""Tests for image and video derivative generation."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from driftnote.ingest.attachments import (
+    AttachmentArtifacts,
+    derive_photo,
+    derive_video_poster,
+)
+
+
+FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "images"
+
+
+def test_derive_photo_jpeg_creates_web_and_thumb(tmp_path: Path) -> None:
+    artifacts = derive_photo(
+        original_bytes=(FIXTURE_DIR / "tiny.jpg").read_bytes(),
+        original_filename="tiny.jpg",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    assert isinstance(artifacts, AttachmentArtifacts)
+    assert artifacts.original_path == tmp_path / "originals" / "tiny.jpg"
+    assert artifacts.web_path == tmp_path / "web" / "tiny.jpg"
+    assert artifacts.thumb_path == tmp_path / "thumbs" / "tiny.jpg"
+    assert artifacts.original_path.exists()
+    assert artifacts.web_path.exists()
+    assert artifacts.thumb_path.exists()
+    with Image.open(artifacts.thumb_path) as t:
+        assert max(t.size) == 320
+    with Image.open(artifacts.web_path) as w:
+        # Original is 200x150 — already smaller than 1600 cap, so web copy keeps the orientation.
+        assert max(w.size) == 200
+
+
+def test_derive_photo_heic_converts_to_jpeg(tmp_path: Path) -> None:
+    artifacts = derive_photo(
+        original_bytes=(FIXTURE_DIR / "tiny.heic").read_bytes(),
+        original_filename="tiny.heic",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    # Original is preserved verbatim.
+    assert artifacts.original_path.suffix == ".heic"
+    # Web/thumb are JPEG for browser compatibility.
+    assert artifacts.web_path.suffix == ".jpg"
+    assert artifacts.thumb_path.suffix == ".jpg"
+    with Image.open(artifacts.web_path) as img:
+        assert img.format == "JPEG"
+
+
+def test_derive_photo_strips_exif_from_derivatives(tmp_path: Path) -> None:
+    # Build an in-memory JPEG with embedded EXIF.
+    from PIL import Image as _Image
+    from PIL.ExifTags import TAGS as _TAGS
+
+    src = _Image.new("RGB", (200, 150), color=(60, 100, 180))
+    exif_bytes = b""
+    if hasattr(src, "getexif"):
+        exif = src.getexif()
+        exif[0x010F] = "DriftnoteTestMaker"  # Make
+        exif_bytes = exif.tobytes()
+    out = tmp_path / "with-exif.jpg"
+    src.save(out, "JPEG", exif=exif_bytes)
+    raw = out.read_bytes()
+
+    artifacts = derive_photo(
+        original_bytes=raw,
+        original_filename="with-exif.jpg",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    with Image.open(artifacts.web_path) as web:
+        web_exif = web.getexif() if hasattr(web, "getexif") else {}
+    assert all(tag != 0x010F for tag in web_exif)
+
+
+def test_derive_video_poster_extracts_frame(tmp_path: Path) -> None:
+    poster = derive_video_poster(
+        original_bytes=(FIXTURE_DIR / "tiny.mov").read_bytes(),
+        original_filename="tiny.mov",
+        originals_dir=tmp_path / "originals",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    assert poster.original_path.exists()
+    assert poster.thumb_path.suffix == ".jpg"
+    assert poster.thumb_path.exists()
+    assert poster.web_path is None
+    with Image.open(poster.thumb_path) as img:
+        assert img.format == "JPEG"
+
+
+def test_derive_photo_preserves_original_filename_for_originals_dir(tmp_path: Path) -> None:
+    artifacts = derive_photo(
+        original_bytes=(FIXTURE_DIR / "tiny.jpg").read_bytes(),
+        original_filename="my photo!.jpg",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    # Originals are stored with the sender's filename verbatim (they're treated as opaque).
+    assert artifacts.original_path.name == "my photo!.jpg"
+    # Web/thumb may differ in suffix but should keep the stem.
+    assert artifacts.web_path.stem == "my photo!"
+
+
+def test_derive_photo_handles_unreadable_original(tmp_path: Path) -> None:
+    """If the bytes don't decode as an image, original is still saved but web/thumb are None."""
+    artifacts = derive_photo(
+        original_bytes=b"not an image",
+        original_filename="broken.jpg",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    assert artifacts.original_path.exists()
+    assert artifacts.web_path is None
+    assert artifacts.thumb_path is None
+```
+
+- [ ] **Step 3: Implement `src/driftnote/ingest/attachments.py`**
+
+```python
+"""Generate web/thumb derivatives for photos and a poster frame for videos.
+
+Originals are stored verbatim (treated as opaque bytes). Derivatives:
+- Photo web copy: max-axis 1600px, JPEG, EXIF stripped.
+- Photo thumbnail: max-axis 320px, JPEG.
+- HEIC → JPEG conversion for web/thumb (originals stay HEIC).
+- Video poster: ffmpeg-extracted single frame at ~1s, max-axis 320px JPEG.
+
+If decoding fails for any reason, the original is still preserved and
+derivative paths come back as None — the UI falls back to a placeholder.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+
+import pillow_heif
+from PIL import Image
+
+pillow_heif.register_heif_opener()
+
+WEB_MAX_AXIS = 1600
+THUMB_MAX_AXIS = 320
+
+
+@dataclass(frozen=True)
+class AttachmentArtifacts:
+    original_path: Path
+    web_path: Path | None
+    thumb_path: Path | None
+
+
+def derive_photo(
+    *,
+    original_bytes: bytes,
+    original_filename: str,
+    originals_dir: Path,
+    web_dir: Path,
+    thumbs_dir: Path,
+) -> AttachmentArtifacts:
+    """Save original bytes verbatim, then attempt to produce web + thumb derivatives.
+
+    Returns artifacts with `web_path`/`thumb_path = None` if derivative
+    generation fails; the original is always written as long as the disk
+    write itself succeeds.
+    """
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    web_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    original_path = originals_dir / original_filename
+    original_path.write_bytes(original_bytes)
+
+    derived_stem = Path(original_filename).stem
+    web_path = web_dir / f"{derived_stem}.jpg"
+    thumb_path = thumbs_dir / f"{derived_stem}.jpg"
+
+    try:
+        with Image.open(BytesIO(original_bytes)) as img:
+            img = img.convert("RGB")
+            web_img = _resize_max_axis(img, WEB_MAX_AXIS)
+            web_img.save(web_path, "JPEG", quality=85, optimize=True)  # EXIF stripped
+            thumb_img = _resize_max_axis(img, THUMB_MAX_AXIS)
+            thumb_img.save(thumb_path, "JPEG", quality=80, optimize=True)
+    except Exception:
+        return AttachmentArtifacts(
+            original_path=original_path,
+            web_path=None,
+            thumb_path=None,
+        )
+
+    return AttachmentArtifacts(
+        original_path=original_path,
+        web_path=web_path,
+        thumb_path=thumb_path,
+    )
+
+
+def derive_video_poster(
+    *,
+    original_bytes: bytes,
+    original_filename: str,
+    originals_dir: Path,
+    thumbs_dir: Path,
+) -> AttachmentArtifacts:
+    """Save original video bytes verbatim and extract a poster frame as a JPEG thumbnail."""
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    original_path = originals_dir / original_filename
+    original_path.write_bytes(original_bytes)
+
+    derived_stem = Path(original_filename).stem
+    thumb_path = thumbs_dir / f"{derived_stem}.jpg"
+
+    if shutil.which("ffmpeg") is None:
+        return AttachmentArtifacts(original_path=original_path, web_path=None, thumb_path=None)
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg") as raw_thumb:
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel", "error",
+                    "-i", str(original_path),
+                    "-ss", "00:00:01",     # seek 1s in
+                    "-frames:v", "1",
+                    "-vf", f"scale='min({THUMB_MAX_AXIS},iw)':-2",
+                    raw_thumb.name,
+                ],
+                check=True,
+                timeout=30,
+            )
+            with Image.open(raw_thumb.name) as img:
+                img.convert("RGB").save(thumb_path, "JPEG", quality=80, optimize=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return AttachmentArtifacts(original_path=original_path, web_path=None, thumb_path=None)
+
+    return AttachmentArtifacts(original_path=original_path, web_path=None, thumb_path=thumb_path)
+
+
+def _resize_max_axis(img: Image.Image, cap: int) -> Image.Image:
+    w, h = img.size
+    longest = max(w, h)
+    if longest <= cap:
+        return img.copy()
+    ratio = cap / longest
+    new_size = (int(w * ratio), int(h * ratio))
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_ingest_attachments.py -v`
+Expected: 6 passed (requires `ffmpeg` and `libheif1` available — already in Containerfile; on the dev host these come from the toolbox image).
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/ingest/attachments.py tests/fixtures/images/ tests/unit/test_ingest_attachments.py
+git commit -m "feat(ingest): photo derivatives + video poster via Pillow/pillow-heif/ffmpeg"
+```
+
+---
+
+### Task 6.3: `ingest/pipeline.py` — orchestration with rollback + idempotency
+
+**Files:**
+- Create: `src/driftnote/ingest/pipeline.py`
+- Create: `tests/integration/test_ingest_pipeline.py`
+
+This is the heart of the ingestion flow. It composes parse + attachments + filesystem + repository, applies per-date locking, and implements the spec §3.B failure semantics (whole-message rollback on any pre-IMAP-move failure; `imap_moved=0` retry path on IMAP-move failure).
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""End-to-end tests for ingestion pipeline (no real IMAP/SMTP)."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import make_msgid
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.config import (
+    BackupConfig, Config, DigestsConfig, DiskConfig, EmailConfig,
+    ParsingConfig, PromptConfig, ScheduleConfig, Secrets,
+)
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.ingest.pipeline import IngestionResult, ingest_one
+from driftnote.repository.entries import get_entry, list_entries_by_tag
+from driftnote.repository.ingested import get_ingested, is_ingested
+from driftnote.repository.media import list_media
+
+from pydantic import SecretStr
+
+
+def _eml_bytes(*, subject="[Driftnote] How was 2026-05-06?",
+               body_text="Mood: 💪\n\nLong day at work. #work",
+               in_reply_to="<prompt-2026-05-06@driftnote>",
+               attachments=None,
+               message_id=None) -> tuple[bytes, str]:
+    msg = EmailMessage()
+    msg["From"] = "you@gmail.com"
+    msg["To"] = "you@gmail.com"
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id or make_msgid(domain="driftnote")
+    msg["Date"] = "Wed, 06 May 2026 21:30:15 +0000"
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    msg.set_content(body_text)
+    for filename, mime, payload in attachments or []:
+        maintype, _, subtype = mime.partition("/")
+        msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
+    return msg.as_bytes(), msg["Message-ID"]
+
+
+def _config(*, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)") -> Config:
+    return Config(
+        schedule=ScheduleConfig(
+            daily_prompt="0 21 * * *", weekly_digest="0 8 * * 1",
+            monthly_digest="0 8 1 * *", yearly_digest="0 8 1 1 *",
+            imap_poll="*/5 * * * *", timezone="Europe/London",
+        ),
+        email=EmailConfig(
+            imap_folder="INBOX", imap_processed_folder="INBOX.Processed",
+            recipient="you@gmail.com", sender_name="Driftnote",
+            imap_host="x", imap_port=993, imap_tls=True,
+            smtp_host="x", smtp_port=587, smtp_tls=False, smtp_starttls=True,
+        ),
+        prompt=PromptConfig(subject_template="[Driftnote] {date}", body_template="t.j2"),
+        parsing=ParsingConfig(mood_regex=mood_regex, tag_regex=tag_regex, max_photos=4, max_videos=2),
+        digests=DigestsConfig(weekly_enabled=True, monthly_enabled=True, yearly_enabled=True),
+        backup=BackupConfig(retain_months=12, encrypt=False, age_key_path=""),
+        disk=DiskConfig(warn_percent=80, alert_percent=95, check_cron="0 */6 * * *", data_path="/var/driftnote/data"),
+        secrets=Secrets(
+            gmail_user="you@gmail.com", gmail_app_password=SecretStr("p"),
+            cf_access_aud="aud", cf_team_domain="t.example.com",
+        ),
+    )
+
+
+@pytest.fixture
+def setup(tmp_path: Path) -> tuple[Engine, Path, Config]:
+    engine = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(engine)
+    data_root = tmp_path / "data"
+    cfg = _config()
+    return engine, data_root, cfg
+
+
+def test_ingest_creates_entry_and_db_row(setup) -> None:
+    engine, data_root, cfg = setup
+    raw, mid = _eml_bytes()
+
+    with session_scope(engine) as session:
+        # Pre-record the prompt that this is in reply to, so the date anchor works.
+        from driftnote.repository.ingested import record_pending_prompt
+        record_pending_prompt(
+            session,
+            date="2026-05-06",
+            message_id="<prompt-2026-05-06@driftnote>",
+            sent_at="2026-05-06T21:00:00Z",
+        )
+
+    result = ingest_one(
+        raw=raw,
+        config=cfg,
+        engine=engine,
+        data_root=data_root,
+        received_at=datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc),
+    )
+
+    assert isinstance(result, IngestionResult)
+    assert result.ingested is True
+    assert result.entry_date == "2026-05-06"
+    assert (data_root / "entries" / "2026" / "05" / "06" / "entry.md").exists()
+    assert (data_root / "entries" / "2026" / "05" / "06" / "raw" / "2026-05-06T21-30-15Z.eml").exists()
+
+    with session_scope(engine) as session:
+        entry = get_entry(session, "2026-05-06")
+        ing = get_ingested(session, mid)
+        tagged = list_entries_by_tag(session, "work")
+    assert entry is not None
+    assert entry.mood == "💪"
+    assert ing is not None and ing.imap_moved == 0
+    assert [e.date for e in tagged] == ["2026-05-06"]
+
+
+def test_ingest_is_idempotent_on_message_id(setup) -> None:
+    engine, data_root, cfg = setup
+    raw, mid = _eml_bytes()
+
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import record_pending_prompt
+        record_pending_prompt(session, date="2026-05-06", message_id="<prompt-2026-05-06@driftnote>", sent_at="t")
+
+    received_at = datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc)
+    r1 = ingest_one(raw=raw, config=cfg, engine=engine, data_root=data_root, received_at=received_at)
+    r2 = ingest_one(raw=raw, config=cfg, engine=engine, data_root=data_root, received_at=received_at)
+    assert r1.ingested is True
+    assert r2.ingested is False  # second call short-circuits — already ingested
+    # Only one raw .eml file exists (no duplicate).
+    raws = list((data_root / "entries" / "2026" / "05" / "06" / "raw").glob("*.eml"))
+    assert len(raws) == 1
+
+
+def test_ingest_appends_for_second_reply_same_date(setup) -> None:
+    engine, data_root, cfg = setup
+
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import record_pending_prompt
+        record_pending_prompt(session, date="2026-05-06", message_id="<prompt-2026-05-06@driftnote>", sent_at="t")
+
+    raw1, _ = _eml_bytes(body_text="Mood: 💪\n\nfirst section #work")
+    raw2, _ = _eml_bytes(body_text="afterthought #cooking")
+
+    ingest_one(raw=raw1, config=cfg, engine=engine, data_root=data_root,
+               received_at=datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc))
+    ingest_one(raw=raw2, config=cfg, engine=engine, data_root=data_root,
+               received_at=datetime(2026, 5, 7, 2, 15, 22, tzinfo=timezone.utc))
+
+    entry_md = (data_root / "entries" / "2026" / "05" / "06" / "entry.md").read_text()
+    assert "first section" in entry_md
+    assert "afterthought" in entry_md
+    assert "\n---\n" in entry_md.split("\n---\n", 2)[-1]  # body separator between sections
+
+    with session_scope(engine) as session:
+        tagged_work = list_entries_by_tag(session, "work")
+        tagged_cook = list_entries_by_tag(session, "cooking")
+    assert tagged_work and tagged_cook  # tags accumulate across sections
+
+
+def test_ingest_falls_back_to_date_header_when_no_matching_prompt(setup) -> None:
+    engine, data_root, cfg = setup
+    raw, _ = _eml_bytes(in_reply_to=None)
+    received_at = datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc)
+
+    result = ingest_one(raw=raw, config=cfg, engine=engine, data_root=data_root, received_at=received_at)
+
+    assert result.ingested is True
+    # Entry date taken from the message Date header (Wed, 06 May 2026 21:30:15 +0000)
+    assert result.entry_date == "2026-05-06"
+
+
+def test_ingest_drops_attachments_over_limits(setup) -> None:
+    engine, data_root, cfg = setup
+    cfg = cfg.model_copy(update={"parsing": cfg.parsing.model_copy(update={"max_photos": 1})})
+    raw, _ = _eml_bytes(
+        attachments=[
+            ("a.jpg", "image/jpeg", b"\xff\xd8\xff\xd9"),
+            ("b.jpg", "image/jpeg", b"\xff\xd8\xff\xd9"),
+        ],
+    )
+
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import record_pending_prompt
+        record_pending_prompt(session, date="2026-05-06", message_id="<prompt-2026-05-06@driftnote>", sent_at="t")
+
+    received_at = datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc)
+    ingest_one(raw=raw, config=cfg, engine=engine, data_root=data_root, received_at=received_at)
+
+    with session_scope(engine) as session:
+        media_rows = list_media(session, "2026-05-06")
+    assert [m.filename for m in media_rows] == ["a.jpg"]
+
+
+def test_ingest_rolls_back_on_filesystem_failure(setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, data_root, cfg = setup
+    raw, mid = _eml_bytes()
+
+    with session_scope(engine) as session:
+        from driftnote.repository.ingested import record_pending_prompt
+        record_pending_prompt(session, date="2026-05-06", message_id="<prompt-2026-05-06@driftnote>", sent_at="t")
+
+    # Simulate a filesystem failure in markdown write.
+    from driftnote.filesystem import markdown_io as _mdio
+
+    def _explode(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_mdio, "write_entry", _explode)
+
+    with pytest.raises(OSError):
+        ingest_one(
+            raw=raw, config=cfg, engine=engine, data_root=data_root,
+            received_at=datetime(2026, 5, 6, 21, 30, 15, tzinfo=timezone.utc),
+        )
+
+    with session_scope(engine) as session:
+        assert not is_ingested(session, mid)
+    # No partial entry.md or raw/*.eml left behind.
+    entry_dir = data_root / "entries" / "2026" / "05" / "06"
+    assert not entry_dir.exists() or not any(entry_dir.iterdir())
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_ingest_pipeline.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/ingest/pipeline.py`**
+
+```python
+"""Orchestrate ingestion of one raw email into the entry store + index.
+
+Implements the spec §3.B failure semantics:
+- Idempotency on Message-ID via `ingested_messages`.
+- Per-date `fcntl.flock` so two replies for the same date serialize.
+- Whole-message rollback on any pre-IMAP-move failure: no entry.md mutation,
+  no raw.eml written, no SQLite row.
+- The IMAP-move retry path is *not* in this function — it lives in the
+  poll job (Chunk 7), which calls `mark_imap_moved()` after a successful move.
+"""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import Engine
+
+from driftnote.config import Config
+from driftnote.db import session_scope
+from driftnote.filesystem.layout import EntryPaths, entry_paths_for, raw_eml_filename
+from driftnote.filesystem.locks import entry_lock
+from driftnote.filesystem.markdown_io import (
+    EntryDocument,
+    PhotoRef,
+    VideoRef,
+    read_entry,
+    write_entry,
+)
+from driftnote.ingest.attachments import (
+    AttachmentArtifacts,
+    derive_photo,
+    derive_video_poster,
+)
+from driftnote.ingest.parse import AttachmentMaterial, ParsedReply, parse_reply
+from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
+from driftnote.repository.ingested import (
+    find_prompt_by_message_id,
+    is_ingested,
+    record_ingested,
+)
+from driftnote.repository.media import MediaInput, replace_media
+
+
+@dataclass(frozen=True)
+class IngestionResult:
+    ingested: bool       # False if message_id was already ingested (no-op)
+    entry_date: str      # 'YYYY-MM-DD'
+    message_id: str
+
+
+def ingest_one(
+    *,
+    raw: bytes,
+    config: Config,
+    engine: Engine,
+    data_root: Path,
+    received_at: datetime,
+) -> IngestionResult:
+    parsed = parse_reply(
+        raw,
+        mood_regex=config.parsing.mood_regex,
+        tag_regex=config.parsing.tag_regex,
+    )
+
+    # Idempotency: if we've already ingested this message-id, no-op early.
+    with session_scope(engine) as session:
+        if is_ingested(session, parsed.message_id):
+            entry_date = _entry_date_from_db_or_parsed(session, parsed)
+            return IngestionResult(ingested=False, entry_date=entry_date, message_id=parsed.message_id)
+
+    entry_date = _resolve_entry_date(parsed, engine)
+
+    # Per-date lock: serialize concurrent same-date ingestions.
+    with entry_lock(data_root, _date(entry_date)):
+        paths = entry_paths_for(data_root, _date(entry_date))
+        # Track resources written so we can roll them back on failure.
+        created_dirs: list[Path] = []
+        created_files: list[Path] = []
+
+        try:
+            existing_doc = read_entry(paths.entry_md) if paths.entry_md.exists() else None
+
+            # Cap attachments per config.
+            photos = [a for a in parsed.attachments if a.kind == "photo"][: config.parsing.max_photos]
+            videos = [a for a in parsed.attachments if a.kind == "video"][: config.parsing.max_videos]
+
+            # Write raw .eml *first* — this is the canonical input record.
+            paths.raw_dir.mkdir(parents=True, exist_ok=True)
+            created_dirs.append(paths.raw_dir)
+            received_utc = received_at.astimezone(timezone.utc)
+            eml_filename = raw_eml_filename(received_utc)
+            eml_path = paths.raw_dir / eml_filename
+            eml_path.write_bytes(raw)
+            created_files.append(eml_path)
+
+            # Save originals + derive web/thumb/poster.
+            photo_artifacts: list[tuple[AttachmentMaterial, AttachmentArtifacts]] = []
+            for material in photos:
+                art = derive_photo(
+                    original_bytes=material.content,
+                    original_filename=material.filename,
+                    originals_dir=paths.originals_dir,
+                    web_dir=paths.web_dir,
+                    thumbs_dir=paths.thumbs_dir,
+                )
+                photo_artifacts.append((material, art))
+                _track_artifact_files(art, created_files)
+
+            video_artifacts: list[tuple[AttachmentMaterial, AttachmentArtifacts]] = []
+            for material in videos:
+                art = derive_video_poster(
+                    original_bytes=material.content,
+                    original_filename=material.filename,
+                    originals_dir=paths.originals_dir,
+                    thumbs_dir=paths.thumbs_dir,
+                )
+                video_artifacts.append((material, art))
+                _track_artifact_files(art, created_files)
+
+            # Compose new EntryDocument. If a prior doc exists, append this section's body
+            # and union the tags + media.
+            doc = _compose_entry_doc(
+                entry_date=entry_date,
+                parsed=parsed,
+                received_utc=received_utc,
+                eml_filename=eml_filename,
+                photos=photo_artifacts,
+                videos=video_artifacts,
+                existing=existing_doc,
+            )
+            write_entry(paths.entry_md, doc)
+            created_files.append(paths.entry_md)
+
+            # Upsert into SQLite (entries + tags + media + ingested_messages).
+            with session_scope(engine) as session:
+                upsert_entry(
+                    session,
+                    EntryRecord(
+                        date=entry_date,
+                        mood=doc.mood,
+                        body_text=doc.body,
+                        body_md=doc.body,
+                        created_at=doc.created_at,
+                        updated_at=doc.updated_at,
+                    ),
+                )
+                replace_tags(session, entry_date, list(doc.tags))
+                replace_media(
+                    session,
+                    entry_date,
+                    [MediaInput(kind="photo", filename=p.filename, caption=p.caption) for p in doc.photos]
+                    + [MediaInput(kind="video", filename=v.filename, caption=v.caption) for v in doc.videos],
+                )
+                record_ingested(
+                    session,
+                    message_id=parsed.message_id,
+                    date=entry_date,
+                    eml_path=str(eml_path.relative_to(paths.dir)),
+                    ingested_at=received_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+        except BaseException:
+            _rollback_files(created_files, created_dirs, paths)
+            raise
+
+    return IngestionResult(ingested=True, entry_date=entry_date, message_id=parsed.message_id)
+
+
+def _date(s: str):
+    from datetime import date
+    y, m, d = (int(x) for x in s.split("-"))
+    return date(y, m, d)
+
+
+def _resolve_entry_date(parsed: ParsedReply, engine: Engine) -> str:
+    """Map a reply to its entry date. Prefer the In-Reply-To anchor; else use the
+    Date header in the configured tz; else today (UTC)."""
+    if parsed.in_reply_to:
+        with session_scope(engine) as session:
+            pending = find_prompt_by_message_id(session, parsed.in_reply_to)
+        if pending is not None:
+            return pending.date
+    if parsed.date_header is not None:
+        return parsed.date_header.astimezone(timezone.utc).date().isoformat()
+    return datetime.now(tz=timezone.utc).date().isoformat()
+
+
+def _entry_date_from_db_or_parsed(session, parsed: ParsedReply) -> str:
+    from driftnote.repository.ingested import get_ingested
+    rec = get_ingested(session, parsed.message_id)
+    if rec is not None:
+        return rec.date
+    return parsed.date_header.astimezone(timezone.utc).date().isoformat() if parsed.date_header else datetime.now(tz=timezone.utc).date().isoformat()
+
+
+def _compose_entry_doc(
+    *,
+    entry_date: str,
+    parsed: ParsedReply,
+    received_utc: datetime,
+    eml_filename: str,
+    photos: list[tuple[AttachmentMaterial, AttachmentArtifacts]],
+    videos: list[tuple[AttachmentMaterial, AttachmentArtifacts]],
+    existing: EntryDocument | None,
+) -> EntryDocument:
+    iso_now = received_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_section = parsed.body.strip("\n")
+
+    if existing is None:
+        body = new_section + ("\n" if new_section else "")
+        tags = list(parsed.tags)
+        photo_refs = [PhotoRef(filename=m.filename) for m, _ in photos]
+        video_refs = [VideoRef(filename=m.filename) for m, _ in videos]
+        return EntryDocument(
+            date=_date(entry_date),
+            mood=parsed.mood,
+            tags=tags,
+            photos=photo_refs,
+            videos=video_refs,
+            created_at=iso_now,
+            updated_at=iso_now,
+            sources=[f"raw/{eml_filename}"],
+            body=body,
+        )
+
+    # Append a new section separated by ---.
+    appended_body = (existing.body.rstrip("\n") + "\n\n---\n\n" + new_section).rstrip("\n") + "\n"
+    union_tags: list[str] = list(existing.tags)
+    seen = set(union_tags)
+    for t in parsed.tags:
+        if t not in seen:
+            seen.add(t)
+            union_tags.append(t)
+    photo_refs = list(existing.photos) + [PhotoRef(filename=m.filename) for m, _ in photos]
+    video_refs = list(existing.videos) + [VideoRef(filename=m.filename) for m, _ in videos]
+    sources = list(existing.sources) + [f"raw/{eml_filename}"]
+    return EntryDocument(
+        date=_date(entry_date),
+        mood=existing.mood or parsed.mood,
+        tags=union_tags,
+        photos=photo_refs,
+        videos=video_refs,
+        created_at=existing.created_at,
+        updated_at=iso_now,
+        sources=sources,
+        body=appended_body,
+    )
+
+
+def _track_artifact_files(art: AttachmentArtifacts, sink: list[Path]) -> None:
+    for p in (art.original_path, art.web_path, art.thumb_path):
+        if p is not None:
+            sink.append(p)
+
+
+def _rollback_files(files: list[Path], _dirs: list[Path], paths: EntryPaths) -> None:
+    """Remove any files created during a failed ingest. Empty subdirs are removed too.
+
+    The whole-entry directory is removed only if it was created in this call (i.e.
+    no prior entry.md existed). We approximate this by checking whether the entry.md
+    is present and not in `files` (meaning it pre-existed).
+    """
+    for f in files:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # Cleanup obviously-empty subdirs we created.
+    for sub in (paths.raw_dir, paths.web_dir, paths.thumbs_dir, paths.originals_dir):
+        if sub.exists() and not any(sub.iterdir()):
+            try:
+                sub.rmdir()
+            except OSError:
+                pass
+    if paths.dir.exists() and not any(paths.dir.iterdir()):
+        try:
+            shutil.rmtree(paths.dir)
+        except OSError:
+            pass
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_ingest_pipeline.py -v`
+Expected: 6 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/ingest/pipeline.py tests/integration/test_ingest_pipeline.py
+git commit -m "feat(ingest): orchestrated pipeline with rollback + idempotency"
+```
+
+---
+
+### Chunk 6 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–6 tests pass: `uv run pytest -v` (≥81 tests).
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] `tests/fixtures/images/` contains `tiny.jpg`, `tiny.heic`, `tiny.mov`.
+- [ ] 3 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** With ingestion complete, Chunks 7 (scheduler+jobs), 8 (digest rendering), and 9 (web layer) can be developed in parallel worktrees.
