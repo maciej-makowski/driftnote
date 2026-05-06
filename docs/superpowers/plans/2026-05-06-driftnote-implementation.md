@@ -356,7 +356,7 @@ USER driftnote
 
 EXPOSE 8000
 
-CMD ["uvicorn", "driftnote.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "--factory", "driftnote.app:create_app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 - [ ] **Step 2: Create `.dockerignore`**
@@ -1239,9 +1239,11 @@ Expected: FAIL.
 ```python
 """SQLAlchemy ORM models matching the SQLite schema in the design spec.
 
-The `entries` table uses an explicit INTEGER PRIMARY KEY `id` so that FTS5 can
-reference it via `content_rowid='id'`. Foreign keys throughout reference
-`entries.date` (the natural key), not `entries.id`.
+The `entries` table uses an explicit INTEGER PRIMARY KEY `id` (with a UNIQUE
+constraint on `date`) so that FTS5 can reference rows via `content_rowid='id'`.
+This is a deliberate refinement of spec §2 — the spec's prose treats `date` as
+the natural key, but FTS5 requires a true rowid alias. Foreign keys throughout
+still reference `entries.date`, preserving the natural-key relationships.
 """
 
 from __future__ import annotations
@@ -1648,13 +1650,12 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 
-def test_healthz_returns_ok(monkeypatch) -> None:
-    monkeypatch.setenv("DRIFTNOTE_GMAIL_USER", "u@example.com")
-    monkeypatch.setenv("DRIFTNOTE_GMAIL_APP_PASSWORD", "p")
-    monkeypatch.setenv("DRIFTNOTE_CF_ACCESS_AUD", "aud")
-    monkeypatch.setenv("DRIFTNOTE_CF_TEAM_DOMAIN", "team.example.com")
-    monkeypatch.setenv("DRIFTNOTE_ENVIRONMENT", "dev")
+def test_healthz_returns_ok() -> None:
+    """Smoke test: the minimal create_app() boots and /healthz returns 200.
 
+    Chunk 2's create_app() does no config loading; Chunk 9 will expand it and
+    re-add env-var setup to this test (or replace it with a fixture).
+    """
     from driftnote.app import create_app
 
     app = create_app(skip_startup_jobs=True)
@@ -1673,7 +1674,13 @@ Expected: FAIL.
 - [ ] **Step 3: Implement minimal `src/driftnote/app.py`**
 
 ```python
-"""FastAPI app factory. Full wiring lands in Chunk 8; this minimum gives us /healthz."""
+"""FastAPI app factory. Full wiring lands in Chunk 9; this minimum gives us /healthz.
+
+Module is import-safe — no env vars or config loading at import time. The
+Containerfile invokes `uvicorn --factory driftnote.app:create_app` so config
+loading happens inside the factory, not at import. Chunk 9 expands the factory
+to load Settings, init the DB, and start the scheduler.
+"""
 
 from __future__ import annotations
 
@@ -1684,7 +1691,7 @@ def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
     """Create and configure the Driftnote FastAPI app.
 
     `skip_startup_jobs` is True in tests / when the harness only wants the HTTP
-    surface. Full lifespan wiring (DB init, scheduler start) lands in Chunk 8.
+    surface. Full lifespan wiring (DB init, scheduler start) lands in Chunk 9.
     """
     app = FastAPI(title="Driftnote", version="0.1.0")
 
@@ -1693,9 +1700,6 @@ def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
         return {"status": "ok"}
 
     return app
-
-
-app = create_app()
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1713,20 +1717,16 @@ Expected: 0 issues.
 Run:
 ```bash
 podman --remote build -f Containerfile -t driftnote:smoke .
-podman --remote run --rm -d --name driftnote-smoke \
-    -e DRIFTNOTE_GMAIL_USER=u@example.com \
-    -e DRIFTNOTE_GMAIL_APP_PASSWORD=p \
-    -e DRIFTNOTE_CF_ACCESS_AUD=aud \
-    -e DRIFTNOTE_CF_TEAM_DOMAIN=team.example.com \
-    -e DRIFTNOTE_ENVIRONMENT=dev \
-    -p 8000:8000 driftnote:smoke
-sleep 3
-curl -sf http://localhost:8000/healthz
+podman --remote run --rm -d --name driftnote-smoke -p 8000:8000 driftnote:smoke
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf http://localhost:8000/healthz && break
+    sleep 1
+done
 podman --remote stop driftnote-smoke
 podman --remote rmi driftnote:smoke
 ```
 
-Expected: `{"status":"ok"}` printed; exit code 0.
+Expected: `{"status":"ok"}` printed; exit code 0. (No env vars required at this stage — Chunk 2's `create_app` does no config loading. Chunk 9 will reintroduce env-var requirements.)
 
 - [ ] **Step 7: Commit**
 
@@ -1767,10 +1767,8 @@ repos:
 - [ ] **Step 2: Create `.github/CODEOWNERS`**
 
 ```
-* @<your-github-handle>
+* @maciej-makowski
 ```
-
-(The implementer should replace `<your-github-handle>` with the actual GitHub username at first deploy; it's left as a placeholder so the plan is portable.)
 
 - [ ] **Step 3: Create `.github/workflows/ci.yml`**
 
