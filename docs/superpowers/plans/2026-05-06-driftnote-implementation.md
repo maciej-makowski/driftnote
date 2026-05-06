@@ -6723,3 +6723,1072 @@ git commit -m "feat(scheduler): disk-usage threshold check with stateful alerts"
 - [ ] 5 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off:** Chunk 8 (digest rendering) and Chunk 9 (web layer) can be developed in parallel from the end of Chunk 7. Chunk 8 also adds `scheduler/digest_jobs.py` since renderer + scheduler binding is one logical unit.
+
+---
+
+## Chunk 8: Digest rendering
+
+**Outcome of this chunk:** Pure rendering functions that take SQL-derived data and produce email-ready HTML for weekly, monthly, and yearly digests. Includes the moodboard renderer, the monthly highlights heuristic with progressive fallback, and the yearly contribution-grid. Plus `scheduler/digest_jobs.py` that ties each digest to its cron and an enable flag in config.
+
+### Task 8.1: `digest/moodboard.py` + helpers
+
+**Files:**
+- Create: `src/driftnote/digest/__init__.py`
+- Create: `src/driftnote/digest/moodboard.py`
+- Create: `src/driftnote/digest/inputs.py`
+- Create: `tests/unit/test_digest_moodboard.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for moodboard rendering helpers."""
+
+from __future__ import annotations
+
+from datetime import date
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.moodboard import (
+    weekly_moodboard,
+    monthly_moodboard_grid,
+    yearly_moodboard_grid,
+)
+
+
+def _day(d: str, mood: str | None = "💪") -> DayInput:
+    return DayInput(date=date.fromisoformat(d), mood=mood, tags=[], photo_thumb=None, body_html="")
+
+
+def test_weekly_moodboard_seven_cells_with_emojis_or_dot() -> None:
+    days = [_day("2026-04-27"), _day("2026-04-29", mood=None), _day("2026-05-03", mood="🎉")]
+    cells = weekly_moodboard(week_start=date(2026, 4, 27), days=days)
+    assert len(cells) == 7
+    assert cells[0].emoji == "💪"
+    assert cells[2].emoji is None  # Wed (no day with mood)
+    assert cells[6].emoji == "🎉"
+    assert cells[0].label == "Mon"
+
+
+def test_monthly_moodboard_returns_calendar_rows() -> None:
+    days = [_day("2026-05-01"), _day("2026-05-15", mood="🌧️"), _day("2026-05-31", mood="🎉")]
+    rows = monthly_moodboard_grid(year=2026, month=5, days=days)
+    # May 2026 spans 6 calendar weeks.
+    assert len(rows) >= 5
+    flat = [c for row in rows for c in row]
+    moods = [c.emoji for c in flat if c.in_month and c.day_of_month == 1]
+    assert moods == ["💪"]
+
+
+def test_yearly_grid_53_weeks_max() -> None:
+    days = [_day("2026-01-01"), _day("2026-12-31", mood="🌧️")]
+    grid = yearly_moodboard_grid(year=2026, days=days)
+    # 7 rows (Mon..Sun), <=53 columns
+    assert len(grid) == 7
+    assert all(len(row) <= 53 for row in grid)
+    # Find the cell for 2026-01-01 and 2026-12-31; confirm emojis.
+    cells = [c for row in grid for c in row if c.in_year]
+    by_date = {c.date: c.emoji for c in cells}
+    assert by_date[date(2026, 1, 1)] == "💪"
+    assert by_date[date(2026, 12, 31)] == "🌧️"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_digest_moodboard.py -v`
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement `src/driftnote/digest/__init__.py`** (empty marker)
+
+```python
+"""Digest rendering: weekly, monthly, yearly."""
+```
+
+- [ ] **Step 4: Implement `src/driftnote/digest/inputs.py`** — input data structures
+
+```python
+"""Pydantic-friendly inputs for digest rendering."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+
+
+@dataclass(frozen=True)
+class DayInput:
+    """One day's worth of data needed for digest rendering."""
+
+    date: date
+    mood: str | None
+    tags: list[str]
+    photo_thumb: str | None    # URL fragment / "cid:..." reference
+    body_html: str             # rendered markdown → safe HTML
+
+
+@dataclass(frozen=True)
+class HighlightInput:
+    date: date
+    mood: str | None
+    summary_html: str          # first ~2 sentences as HTML
+    photo_thumb: str | None    # CID reference for inline image
+```
+
+- [ ] **Step 5: Implement `src/driftnote/digest/moodboard.py`**
+
+```python
+"""Moodboard renderers: weekly row, monthly calendar grid, yearly 7×53 grid."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+from driftnote.digest.inputs import DayInput
+
+_WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+@dataclass(frozen=True)
+class WeeklyCell:
+    label: str          # "Mon" .. "Sun"
+    date: date
+    emoji: str | None
+
+
+@dataclass(frozen=True)
+class MonthlyCell:
+    date: date
+    in_month: bool      # False for grid pad cells outside this month
+    day_of_month: int | None
+    emoji: str | None
+
+
+@dataclass(frozen=True)
+class YearlyCell:
+    date: date
+    in_year: bool
+    emoji: str | None
+
+
+def weekly_moodboard(*, week_start: date, days: list[DayInput]) -> list[WeeklyCell]:
+    """Return 7 cells starting at `week_start` (which must be a Monday)."""
+    by_date = {d.date: d.mood for d in days}
+    out: list[WeeklyCell] = []
+    for i in range(7):
+        d = week_start + timedelta(days=i)
+        out.append(WeeklyCell(label=_WEEKDAY_LABELS[i], date=d, emoji=by_date.get(d)))
+    return out
+
+
+def monthly_moodboard_grid(*, year: int, month: int, days: list[DayInput]) -> list[list[MonthlyCell]]:
+    """Calendar grid: rows = weeks, columns = Mon..Sun. Cells outside the
+    target month carry `in_month=False`."""
+    by_date = {d.date: d.mood for d in days}
+
+    first = date(year, month, 1)
+    if month == 12:
+        next_first = date(year + 1, 1, 1)
+    else:
+        next_first = date(year, month + 1, 1)
+
+    # Snap to the Monday of the week containing the 1st.
+    grid_start = first - timedelta(days=first.weekday())
+    rows: list[list[MonthlyCell]] = []
+    cur = grid_start
+    while cur < next_first or cur.weekday() != 0:
+        row: list[MonthlyCell] = []
+        for _ in range(7):
+            in_month = cur.month == month and cur.year == year
+            row.append(MonthlyCell(
+                date=cur,
+                in_month=in_month,
+                day_of_month=cur.day if in_month else None,
+                emoji=by_date.get(cur) if in_month else None,
+            ))
+            cur += timedelta(days=1)
+        rows.append(row)
+    return rows
+
+
+def yearly_moodboard_grid(*, year: int, days: list[DayInput]) -> list[list[YearlyCell]]:
+    """GitHub-style contribution grid: 7 rows (Mon..Sun) × up to 53 columns."""
+    by_date = {d.date: d.mood for d in days}
+    first = date(year, 1, 1)
+    last = date(year, 12, 31)
+
+    grid_start = first - timedelta(days=first.weekday())
+    columns: list[list[YearlyCell]] = []
+    cur = grid_start
+    while cur <= last or cur.weekday() != 0:
+        col: list[YearlyCell] = []
+        for _ in range(7):
+            in_year = cur.year == year
+            col.append(YearlyCell(date=cur, in_year=in_year, emoji=by_date.get(cur) if in_year else None))
+            cur += timedelta(days=1)
+        columns.append(col)
+    # Transpose: rows = weekday (Mon..Sun), cols = week index.
+    rows: list[list[YearlyCell]] = [[col[r] for col in columns] for r in range(7)]
+    return rows
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_digest_moodboard.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 7: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/digest/__init__.py src/driftnote/digest/inputs.py src/driftnote/digest/moodboard.py tests/unit/test_digest_moodboard.py
+git commit -m "feat(digest): moodboard cell builders for week/month/year"
+```
+
+---
+
+### Task 8.2: `digest/weekly.py` — week digest body builder
+
+**Files:**
+- Create: `src/driftnote/digest/weekly.py`
+- Create: `tests/unit/test_digest_weekly.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for weekly digest body composition (HTML)."""
+
+from __future__ import annotations
+
+from datetime import date
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.weekly import build_weekly_digest
+
+
+def _day(d: str, body: str = "<p>hi</p>", mood: str = "💪", tags: list[str] | None = None, thumb: str | None = None) -> DayInput:
+    return DayInput(
+        date=date.fromisoformat(d),
+        mood=mood,
+        tags=tags or [],
+        photo_thumb=thumb,
+        body_html=body,
+    )
+
+
+def test_subject_includes_week_range() -> None:
+    digest = build_weekly_digest(
+        week_start=date(2026, 4, 27),
+        days=[_day("2026-04-27")],
+        web_base_url="https://driftnote.example.com",
+    )
+    assert "2026-04-27" in digest.subject
+    assert "2026-05-03" in digest.subject
+
+
+def test_html_lists_every_day_section_in_order() -> None:
+    digest = build_weekly_digest(
+        week_start=date(2026, 4, 27),
+        days=[_day("2026-04-29"), _day("2026-04-27"), _day("2026-05-02")],
+        web_base_url="https://driftnote.example.com",
+    )
+    html = digest.html
+    i_27 = html.index("2026-04-27")
+    i_29 = html.index("2026-04-29")
+    i_02 = html.index("2026-05-02")
+    assert i_27 < i_29 < i_02
+
+
+def test_html_includes_moodboard_row_with_emojis() -> None:
+    digest = build_weekly_digest(
+        week_start=date(2026, 4, 27),
+        days=[_day("2026-04-27", mood="💪"), _day("2026-05-03", mood="🎉")],
+        web_base_url="https://driftnote.example.com",
+    )
+    assert "💪" in digest.html
+    assert "🎉" in digest.html
+
+
+def test_html_links_to_web_ui() -> None:
+    digest = build_weekly_digest(
+        week_start=date(2026, 4, 27),
+        days=[_day("2026-04-27")],
+        web_base_url="https://driftnote.example.com",
+    )
+    assert "https://driftnote.example.com/entry/2026-04-27" in digest.html
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_digest_weekly.py -v`
+
+- [ ] **Step 3: Implement `src/driftnote/digest/weekly.py`**
+
+```python
+"""Weekly digest body builder.
+
+Produces a `Digest(subject, html)` with:
+- 7-emoji moodboard row at the top
+- One section per day in chronological order with mood, tags, body HTML, optional thumbnail
+- Footer with link to the web UI
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from html import escape
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.moodboard import weekly_moodboard
+
+
+@dataclass(frozen=True)
+class Digest:
+    subject: str
+    html: str
+
+
+def build_weekly_digest(
+    *,
+    week_start: date,
+    days: list[DayInput],
+    web_base_url: str,
+) -> Digest:
+    week_end = week_start + timedelta(days=6)
+    subject = f"[Driftnote] Week of {week_start.isoformat()} → {week_end.isoformat()}"
+
+    cells = weekly_moodboard(week_start=week_start, days=days)
+    moodboard_html = "".join(
+        f'<td style="text-align:center;padding:6px;font-size:24px">'
+        f'<div style="font-size:11px;color:#888">{escape(c.label)}</div>'
+        f'<div>{escape(c.emoji or "·")}</div>'
+        f"</td>"
+        for c in cells
+    )
+
+    days_sorted = sorted(days, key=lambda d: d.date)
+    sections_html = "".join(_render_day_section(d, web_base_url=web_base_url) for d in days_sorted)
+
+    footer_html = (
+        f'<p style="margin-top:24px;color:#888"><a href="{escape(web_base_url)}">Open in Driftnote</a></p>'
+    )
+
+    body_html = f"""
+    <html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:auto;padding:16px">
+      <h1 style="margin-bottom:8px">Week of {escape(week_start.isoformat())} → {escape(week_end.isoformat())}</h1>
+      <table cellspacing="0" cellpadding="0" style="margin:8px 0 24px"><tr>{moodboard_html}</tr></table>
+      {sections_html}
+      {footer_html}
+    </body></html>
+    """.strip()
+
+    return Digest(subject=subject, html=body_html)
+
+
+def _render_day_section(d: DayInput, *, web_base_url: str) -> str:
+    mood = escape(d.mood) if d.mood else ""
+    tags = " ".join(f'<span style="color:#888;margin-right:6px">#{escape(t)}</span>' for t in d.tags)
+    thumb_html = (
+        f'<img src="{escape(d.photo_thumb)}" style="max-width:100%;border-radius:8px;margin-top:8px"/>'
+        if d.photo_thumb else ""
+    )
+    return f"""
+    <section style="margin:16px 0;padding-top:12px;border-top:1px solid #eee">
+      <h2 style="margin:0">
+        <a href="{escape(web_base_url)}/entry/{escape(d.date.isoformat())}" style="color:#222;text-decoration:none">
+          {escape(d.date.isoformat())} <span style="font-size:24px">{mood}</span>
+        </a>
+      </h2>
+      <p style="margin:4px 0 8px">{tags}</p>
+      <div>{d.body_html}</div>
+      {thumb_html}
+    </section>
+    """.strip()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_digest_weekly.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/digest/weekly.py tests/unit/test_digest_weekly.py
+git commit -m "feat(digest): weekly digest HTML builder"
+```
+
+---
+
+### Task 8.3: `digest/monthly.py` — with progressive highlights
+
+**Files:**
+- Create: `src/driftnote/digest/monthly.py`
+- Create: `tests/unit/test_digest_monthly.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for monthly digest builder including the progressive-highlights heuristic."""
+
+from __future__ import annotations
+
+from datetime import date
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.monthly import build_monthly_digest, select_highlights
+
+
+def _day(d: str, *, mood: str = "💪", tags=None, thumb: str | None = None) -> DayInput:
+    return DayInput(
+        date=date.fromisoformat(d),
+        mood=mood,
+        tags=tags or [],
+        photo_thumb=thumb,
+        body_html="<p>body</p>",
+    )
+
+
+def test_select_highlights_prefers_photo_plus_rare_tag() -> None:
+    days = [
+        _day("2026-05-01", thumb="cid:1", tags=["work"]),                 # work appears 5×
+        _day("2026-05-02", thumb="cid:2", tags=["holiday", "work"]),       # holiday rare
+        _day("2026-05-03", thumb="cid:3", tags=["birthday"]),              # birthday rare, no photo
+        _day("2026-05-04", thumb="cid:4", tags=["work"]),
+        _day("2026-05-05", thumb="cid:5", tags=["work"]),
+        _day("2026-05-06", thumb="cid:6", tags=["work"]),
+    ]
+    highlights = select_highlights(days, target=4)
+    # 2026-05-02 qualifies (photo + rare tag). With only 1 qualifying, fallback expands.
+    assert any(h.date == date(2026, 5, 2) for h in highlights)
+
+
+def test_select_highlights_fallback_when_no_photo_plus_rare() -> None:
+    """If nothing matches photo+rare, fall back to days with rare tag OR photo, then to most-photos."""
+    days = [
+        _day(f"2026-05-0{i}", thumb=f"cid:{i}", tags=["common"])
+        for i in range(1, 8)
+    ]
+    highlights = select_highlights(days, target=4)
+    # Length up to target — heuristic should still emit something.
+    assert len(highlights) <= 4
+
+
+def test_select_highlights_no_padding_when_few_candidates() -> None:
+    """Heuristic does not pad: if nothing qualifies even after full fallback, emit fewer."""
+    highlights = select_highlights([], target=4)
+    assert highlights == []
+
+
+def test_subject_is_month_year() -> None:
+    digest = build_monthly_digest(year=2026, month=5, days=[_day("2026-05-01")], web_base_url="https://x")
+    assert "2026" in digest.subject
+    assert "May" in digest.subject or "05" in digest.subject
+
+
+def test_html_includes_calendar_grid_and_stats() -> None:
+    days = [_day("2026-05-01", tags=["work"]), _day("2026-05-15", mood="🌧️", tags=["rest"])]
+    digest = build_monthly_digest(year=2026, month=5, days=days, web_base_url="https://x")
+    assert "💪" in digest.html
+    assert "🌧️" in digest.html
+    assert "work" in digest.html or "Work" in digest.html
+    assert "Stats" in digest.html or "stats" in digest.html or "entries" in digest.html
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_digest_monthly.py -v`
+
+- [ ] **Step 3: Implement `src/driftnote/digest/monthly.py`**
+
+```python
+"""Monthly digest builder.
+
+Subject: `[Driftnote] Month YYYY` (e.g. "[Driftnote] May 2026")
+Body:
+- Calendar-grid moodboard.
+- Stats line: count of entries, top mood, top tags.
+- Up to 6 highlight days, target minimum 4. Selection is progressive:
+  1) days with a photo AND at least one rare tag (used <3× this month);
+  2) days with photo OR rare tag;
+  3) days with the most photos (proxied by photo_thumb being non-null).
+- Link to web UI.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from datetime import date
+from html import escape
+
+from driftnote.digest.inputs import DayInput, HighlightInput
+from driftnote.digest.moodboard import monthly_moodboard_grid
+from driftnote.digest.weekly import Digest
+
+_MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def select_highlights(days: list[DayInput], *, target: int = 4) -> list[HighlightInput]:
+    if not days:
+        return []
+    tag_counts: Counter[str] = Counter()
+    for d in days:
+        tag_counts.update(d.tags)
+    rare_tags = {t for t, c in tag_counts.items() if c < 3}
+
+    def _has_photo(d: DayInput) -> bool:
+        return d.photo_thumb is not None
+
+    def _has_rare_tag(d: DayInput) -> bool:
+        return any(t in rare_tags for t in d.tags)
+
+    pass1 = [d for d in days if _has_photo(d) and _has_rare_tag(d)]
+    if len(pass1) >= target:
+        chosen = pass1
+    else:
+        pass2 = [d for d in days if _has_photo(d) or _has_rare_tag(d)]
+        if len(pass2) >= target:
+            chosen = pass2
+        else:
+            with_photo = [d for d in days if _has_photo(d)]
+            chosen = with_photo if with_photo else days
+
+    chosen = sorted(chosen, key=lambda d: d.date)[:6]
+    return [
+        HighlightInput(
+            date=d.date, mood=d.mood,
+            summary_html=_first_n_sentences(d.body_html, 2),
+            photo_thumb=d.photo_thumb,
+        )
+        for d in chosen
+    ]
+
+
+def build_monthly_digest(
+    *, year: int, month: int, days: list[DayInput], web_base_url: str,
+) -> Digest:
+    name = _MONTH_NAMES[month]
+    subject = f"[Driftnote] {name} {year}"
+
+    cells = monthly_moodboard_grid(year=year, month=month, days=days)
+    grid_html = "".join(_row_html(row) for row in cells)
+
+    moods = Counter(d.mood for d in days if d.mood)
+    tags = Counter(t for d in days for t in d.tags)
+    top_mood = moods.most_common(1)
+    top_tags = tags.most_common(3)
+    stats_html = (
+        f"<p><strong>Stats:</strong> {len(days)} entries"
+        + (f" • top emoji {escape(top_mood[0][0])} ({top_mood[0][1]})" if top_mood else "")
+        + (
+            " • top tags " + ", ".join(f"#{escape(t)}" for t, _ in top_tags)
+            if top_tags else ""
+        )
+        + "</p>"
+    )
+
+    highlights_html = "".join(
+        f"""
+        <section style="margin:16px 0;padding-top:12px;border-top:1px solid #eee">
+          <h3 style="margin:0">
+            <a href="{escape(web_base_url)}/entry/{escape(h.date.isoformat())}" style="color:#222;text-decoration:none">
+              {escape(h.date.isoformat())} <span style="font-size:20px">{escape(h.mood or "")}</span>
+            </a>
+          </h3>
+          {h.summary_html}
+          {f'<img src="{escape(h.photo_thumb)}" style="max-width:100%;border-radius:8px"/>' if h.photo_thumb else ""}
+        </section>
+        """.strip()
+        for h in select_highlights(days)
+    )
+
+    body_html = f"""
+    <html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:auto;padding:16px">
+      <h1>{escape(name)} {year}</h1>
+      <table cellspacing="0" cellpadding="2" style="border-collapse:collapse;margin:8px 0 16px">
+        {grid_html}
+      </table>
+      {stats_html}
+      {highlights_html}
+      <p style="margin-top:24px;color:#888"><a href="{escape(web_base_url)}">Open in Driftnote</a></p>
+    </body></html>
+    """.strip()
+    return Digest(subject=subject, html=body_html)
+
+
+def _row_html(row) -> str:
+    return "<tr>" + "".join(
+        f'<td style="text-align:center;width:32px;height:32px;'
+        f'color:{"#222" if c.in_month else "#ccc"};font-size:18px">'
+        f'{escape(c.emoji or ("·" if c.in_month else ""))}'
+        f"</td>"
+        for c in row
+    ) + "</tr>"
+
+
+def _first_n_sentences(html: str, n: int) -> str:
+    """Naive sentence trim: split on `. `, take first n, retain HTML wrapper."""
+    import re
+    text = re.sub(r"<[^>]+>", "", html).strip()
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    snippet = " ".join(parts[:n])
+    return f"<p>{escape(snippet)}</p>"
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_digest_monthly.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/digest/monthly.py tests/unit/test_digest_monthly.py
+git commit -m "feat(digest): monthly digest with progressive highlights heuristic"
+```
+
+---
+
+### Task 8.4: `digest/yearly.py` — yearly review
+
+**Files:**
+- Create: `src/driftnote/digest/yearly.py`
+- Create: `tests/unit/test_digest_yearly.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for yearly digest builder."""
+
+from __future__ import annotations
+
+from datetime import date
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.yearly import build_yearly_digest
+
+
+def _day(d: str, mood: str | None = "💪", tags=None, thumb=None) -> DayInput:
+    return DayInput(
+        date=date.fromisoformat(d), mood=mood, tags=tags or [], photo_thumb=thumb,
+        body_html="<p>x</p>",
+    )
+
+
+def test_subject_is_year_in_review() -> None:
+    digest = build_yearly_digest(
+        year=2026,
+        days=[_day("2026-01-01")],
+        web_base_url="https://x",
+    )
+    assert "2026" in digest.subject
+    assert "review" in digest.subject.lower()
+
+
+def test_html_includes_yearly_grid_and_streak_stats() -> None:
+    days = [_day(f"2026-01-{i:02d}") for i in range(1, 11)]  # 10-day streak
+    days += [_day("2026-06-15")]  # break in streak
+    digest = build_yearly_digest(year=2026, days=days, web_base_url="https://x")
+    assert "💪" in digest.html
+    assert "Stats" in digest.html or "stats" in digest.html
+    assert "11" in digest.html or "entries" in digest.html
+
+
+def test_html_includes_one_photo_per_month_when_available() -> None:
+    days = [
+        _day(f"2026-{m:02d}-15", thumb=f"cid:photo-{m}", tags=["holiday" if m == 7 else "work"])
+        for m in range(1, 13)
+    ]
+    digest = build_yearly_digest(year=2026, days=days, web_base_url="https://x")
+    assert "cid:photo-1" in digest.html
+    assert "cid:photo-12" in digest.html
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_digest_yearly.py -v`
+
+- [ ] **Step 3: Implement `src/driftnote/digest/yearly.py`**
+
+```python
+"""Yearly digest builder.
+
+Body:
+- 7×~53 contribution-grid moodboard
+- Stats: total entries, longest streak, top 10 emojis, top 10 tags
+- One photo per month (most-tagged day's first photo, fallback any photo)
+- Link to web UI
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from datetime import date, timedelta
+from html import escape
+
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.moodboard import yearly_moodboard_grid
+from driftnote.digest.weekly import Digest
+
+
+def build_yearly_digest(*, year: int, days: list[DayInput], web_base_url: str) -> Digest:
+    subject = f"[Driftnote] {year} in review"
+
+    grid = yearly_moodboard_grid(year=year, days=days)
+    grid_html = "<table cellspacing='1' cellpadding='0' style='border-collapse:separate'>"
+    for row in grid:
+        grid_html += "<tr>" + "".join(
+            f'<td style="width:14px;height:14px;font-size:11px;text-align:center;'
+            f'color:{"#222" if c.in_year else "#ddd"}">{escape(c.emoji or "")}</td>'
+            for c in row
+        ) + "</tr>"
+    grid_html += "</table>"
+
+    moods = Counter(d.mood for d in days if d.mood)
+    tags = Counter(t for d in days for t in d.tags)
+    top10_moods = ", ".join(f"{escape(m)} ({n})" for m, n in moods.most_common(10))
+    top10_tags = ", ".join(f"#{escape(t)} ({n})" for t, n in tags.most_common(10))
+    streak = _longest_streak({d.date for d in days})
+
+    stats_html = (
+        f"<p><strong>Stats</strong>: {len(days)} entries • longest streak {streak} days<br>"
+        f"Top emojis: {top10_moods}<br>"
+        f"Top tags: {top10_tags}</p>"
+    )
+
+    monthly_photos = _one_photo_per_month(days)
+    photo_strip = "".join(
+        f'<img src="{escape(thumb)}" style="max-width:100px;border-radius:6px;margin:4px"/>'
+        for thumb in monthly_photos.values()
+    )
+
+    body_html = f"""
+    <html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:auto;padding:16px">
+      <h1>{year} in review</h1>
+      {grid_html}
+      {stats_html}
+      <p>{photo_strip}</p>
+      <p style="margin-top:24px;color:#888"><a href="{escape(web_base_url)}">Open in Driftnote</a></p>
+    </body></html>
+    """.strip()
+    return Digest(subject=subject, html=body_html)
+
+
+def _longest_streak(dates: set[date]) -> int:
+    if not dates:
+        return 0
+    sorted_dates = sorted(dates)
+    longest = 1
+    cur = 1
+    for prev, nxt in zip(sorted_dates, sorted_dates[1:]):
+        if nxt == prev + timedelta(days=1):
+            cur += 1
+            longest = max(longest, cur)
+        else:
+            cur = 1
+    return longest
+
+
+def _one_photo_per_month(days: list[DayInput]) -> dict[int, str]:
+    by_month: dict[int, str] = {}
+    # Group days by month, prefer most-tagged then any with a thumb.
+    from collections import defaultdict
+    grouped: dict[int, list[DayInput]] = defaultdict(list)
+    for d in days:
+        if d.photo_thumb is None:
+            continue
+        grouped[d.date.month].append(d)
+    for month, ds in grouped.items():
+        ds_sorted = sorted(ds, key=lambda x: (-len(x.tags), x.date))
+        by_month[month] = ds_sorted[0].photo_thumb  # type: ignore[assignment]
+    return by_month
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_digest_yearly.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/digest/yearly.py tests/unit/test_digest_yearly.py
+git commit -m "feat(digest): yearly review with grid + streak + monthly photo strip"
+```
+
+---
+
+### Task 8.5: `scheduler/digest_jobs.py` — wire digests into APScheduler
+
+**Files:**
+- Create: `src/driftnote/scheduler/digest_jobs.py`
+- Create: `src/driftnote/digest/queries.py` (DB → DayInput translation)
+- Create: `tests/integration/test_digest_jobs.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Integration test: digest jobs query DB, render HTML, send via SMTP."""
+
+from __future__ import annotations
+
+import asyncio
+import imaplib
+from datetime import date as _date
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.mail.transport import SmtpTransport
+from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
+from driftnote.scheduler.digest_jobs import run_weekly_digest, run_monthly_digest, run_yearly_digest
+from tests.conftest import MailServer
+
+
+def _smtp(mail_server: MailServer) -> SmtpTransport:
+    return SmtpTransport(
+        host=mail_server.host, port=mail_server.smtp_port,
+        tls=False, starttls=False,
+        username=mail_server.user, password=mail_server.password,
+        sender_address=mail_server.address, sender_name="Driftnote",
+    )
+
+
+@pytest.fixture
+def engine_with_data(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        for d, mood, tags in [
+            ("2026-04-27", "💪", ["work"]),
+            ("2026-04-30", "🎉", ["birthday"]),
+            ("2026-05-01", "☕", ["work", "rest"]),
+        ]:
+            upsert_entry(session, EntryRecord(date=d, mood=mood, body_text="t", body_md="t", created_at="t", updated_at="t"))
+            replace_tags(session, d, tags)
+    return eng
+
+
+@pytest.fixture(autouse=True)
+def _clean_mailbox(mail_server: MailServer):
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    try:
+        mb.select("INBOX")
+        mb.store("1:*", "+FLAGS", r"\Deleted")
+        mb.expunge()
+    except Exception:
+        pass
+    mb.logout()
+
+
+def _last_subject(mail_server: MailServer) -> bytes:
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.select("INBOX")
+    typ, data = mb.search(None, "ALL")
+    ids = data[0].split()
+    typ, hdr = mb.fetch(ids[-1], "(BODY[HEADER.FIELDS (SUBJECT)])")
+    mb.logout()
+    return hdr[0][1]
+
+
+def test_weekly_digest_sends(mail_server: MailServer, engine_with_data: Engine) -> None:
+    asyncio.run(
+        run_weekly_digest(
+            engine=engine_with_data,
+            smtp=_smtp(mail_server),
+            recipient=mail_server.address,
+            week_start=_date(2026, 4, 27),
+            web_base_url="https://x",
+        )
+    )
+    assert b"Week of 2026-04-27" in _last_subject(mail_server)
+
+
+def test_monthly_digest_sends(mail_server: MailServer, engine_with_data: Engine) -> None:
+    asyncio.run(
+        run_monthly_digest(
+            engine=engine_with_data,
+            smtp=_smtp(mail_server),
+            recipient=mail_server.address,
+            year=2026, month=4,
+            web_base_url="https://x",
+        )
+    )
+    assert b"April 2026" in _last_subject(mail_server)
+
+
+def test_yearly_digest_sends(mail_server: MailServer, engine_with_data: Engine) -> None:
+    asyncio.run(
+        run_yearly_digest(
+            engine=engine_with_data,
+            smtp=_smtp(mail_server),
+            recipient=mail_server.address,
+            year=2026,
+            web_base_url="https://x",
+        )
+    )
+    assert b"2026 in review" in _last_subject(mail_server)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_digest_jobs.py -v`
+
+- [ ] **Step 3: Implement `src/driftnote/digest/queries.py`** — turn DB rows into `DayInput`s
+
+```python
+"""Queries that hydrate digest renderers from SQLite."""
+
+from __future__ import annotations
+
+from datetime import date as _date
+from datetime import timedelta
+
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.digest.inputs import DayInput
+from driftnote.repository.entries import list_entries_in_range
+from driftnote.repository.media import list_media
+
+
+def days_in_range(engine: Engine, *, start: _date, end: _date) -> list[DayInput]:
+    with session_scope(engine) as session:
+        entries = list_entries_in_range(session, start.isoformat(), end.isoformat())
+    out: list[DayInput] = []
+    for e in entries:
+        with session_scope(engine) as session:
+            media = list_media(session, e.date)
+        thumb = next((m.filename for m in media if m.kind == "photo"), None)
+        photo_thumb = f"cid:{thumb}" if thumb else None
+        # Body HTML = naive paragraph wrap of stored body_md.
+        from html import escape
+        body_html = "".join(f"<p>{escape(line)}</p>" for line in e.body_md.split("\n\n") if line.strip())
+        out.append(
+            DayInput(
+                date=_date.fromisoformat(e.date),
+                mood=e.mood,
+                tags=[],  # tags filled below
+                photo_thumb=photo_thumb,
+                body_html=body_html,
+            )
+        )
+    # Backfill tags via a single query.
+    with session_scope(engine) as session:
+        from driftnote.models import Tag
+        from sqlalchemy import select
+        tag_rows = session.scalars(
+            select(Tag).where(Tag.date.between(start.isoformat(), end.isoformat()))
+        ).all()
+    tags_by_date: dict[str, list[str]] = {}
+    for t in tag_rows:
+        tags_by_date.setdefault(t.date, []).append(t.tag)
+    return [
+        DayInput(date=d.date, mood=d.mood, tags=tags_by_date.get(d.date.isoformat(), []),
+                 photo_thumb=d.photo_thumb, body_html=d.body_html)
+        for d in out
+    ]
+```
+
+- [ ] **Step 4: Implement `src/driftnote/scheduler/digest_jobs.py`**
+
+```python
+"""Wire digest renderers into SMTP send. The scheduler module-level functions are
+called by APScheduler once Chunk 10 wires them in via cron triggers."""
+
+from __future__ import annotations
+
+from datetime import date as _date
+from datetime import timedelta
+
+from sqlalchemy import Engine
+
+from driftnote.digest.monthly import build_monthly_digest
+from driftnote.digest.queries import days_in_range
+from driftnote.digest.weekly import build_weekly_digest
+from driftnote.digest.yearly import build_yearly_digest
+from driftnote.mail.smtp import send_email
+from driftnote.mail.transport import SmtpTransport
+
+
+async def run_weekly_digest(
+    *, engine: Engine, smtp: SmtpTransport, recipient: str,
+    week_start: _date, web_base_url: str,
+) -> None:
+    week_end = week_start + timedelta(days=6)
+    days = days_in_range(engine, start=week_start, end=week_end)
+    digest = build_weekly_digest(week_start=week_start, days=days, web_base_url=web_base_url)
+    await send_email(
+        smtp, recipient=recipient, subject=digest.subject,
+        body_text=_html_to_text(digest.html), body_html=digest.html,
+    )
+
+
+async def run_monthly_digest(
+    *, engine: Engine, smtp: SmtpTransport, recipient: str,
+    year: int, month: int, web_base_url: str,
+) -> None:
+    start = _date(year, month, 1)
+    end = _date(year + (month // 12), (month % 12) + 1, 1) - timedelta(days=1)
+    days = days_in_range(engine, start=start, end=end)
+    digest = build_monthly_digest(year=year, month=month, days=days, web_base_url=web_base_url)
+    await send_email(
+        smtp, recipient=recipient, subject=digest.subject,
+        body_text=_html_to_text(digest.html), body_html=digest.html,
+    )
+
+
+async def run_yearly_digest(
+    *, engine: Engine, smtp: SmtpTransport, recipient: str,
+    year: int, web_base_url: str,
+) -> None:
+    start = _date(year, 1, 1)
+    end = _date(year, 12, 31)
+    days = days_in_range(engine, start=start, end=end)
+    digest = build_yearly_digest(year=year, days=days, web_base_url=web_base_url)
+    await send_email(
+        smtp, recipient=recipient, subject=digest.subject,
+        body_text=_html_to_text(digest.html), body_html=digest.html,
+    )
+
+
+def _html_to_text(html: str) -> str:
+    import re
+    return re.sub(r"<[^>]+>", "", html).strip()
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_digest_jobs.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/digest/queries.py src/driftnote/scheduler/digest_jobs.py tests/integration/test_digest_jobs.py
+git commit -m "feat(digest): wire weekly/monthly/yearly to SMTP send"
+```
+
+---
+
+### Chunk 8 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–8 tests pass: `uv run pytest -v`.
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] 5 task commits in this chunk with conventional-commit prefixes.
+
+**Hand-off:** Chunk 9 (web layer) follows. Chunks 8 and 9 had no shared dependencies and could have run in parallel from the end of Chunk 7.
