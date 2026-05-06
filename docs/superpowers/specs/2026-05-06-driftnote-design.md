@@ -1,4 +1,4 @@
-# Journal — Design Spec
+# Driftnote — Design Spec
 
 **Status:** approved-pending-implementation
 **Date:** 2026-05-06
@@ -47,12 +47,12 @@ A single Python process on the RPi (Podman container) handles HTTP, scheduling, 
                    │    └── ingestion pipeline                  │
                    │                                            │
                    │  Bind-mounted volume:                      │
-                   │    /var/journal/data/entries/YYYY/MM/DD/   │
-                   │    /var/journal/data/index.sqlite          │
-                   │    /var/journal/config.toml                │
+                   │    /var/driftnote/data/entries/YYYY/MM/DD/   │
+                   │    /var/driftnote/data/index.sqlite          │
+                   │    /var/driftnote/config.toml                │
                    │                                            │
                    │  Host systemd timer:                       │
-                   │    monthly tar.zst → /var/journal/backups/ │
+                   │    monthly tar.zst → /var/driftnote/backups/ │
                    └──────────────┬─────────────────────────────┘
                                   │ SMTP (587) / IMAPS (993)
                                   ▼
@@ -75,7 +75,7 @@ A single Python process on the RPi (Podman container) handles HTTP, scheduling, 
 ### Filesystem (source of truth)
 
 ```
-/var/journal/
+/var/driftnote/
 ├── config.toml
 ├── data/
 │   ├── entries/
@@ -93,7 +93,7 @@ A single Python process on the RPi (Podman container) handles HTTP, scheduling, 
 │   │           ├── IMG_4521.jpg      ← 320px
 │   │           └── VID_4522.jpg      ← ffmpeg poster frame at ~1s
 │   └── index.sqlite                  ← derived, rebuildable
-└── backups/journal-2026-04.tar.zst
+└── backups/driftnote-2026-04.tar.zst
 ```
 
 ### `entry.md` format
@@ -213,7 +213,7 @@ SQLite runs in **WAL mode** with a 5s busy-handler so the host-side backup scrip
 
 ### B. IMAP poll → ingest (default every 5 min)
 
-1. Connect IMAPS to `Journal/Inbox`, search `UNSEEN`.
+1. Connect IMAPS to `Driftnote/Inbox`, search `UNSEEN`.
 2. For each message:
    a. Read `Message-ID`. If already in `ingested_messages` and `imap_moved=1`, skip entirely. If already in `ingested_messages` and `imap_moved=0`, take the **IMAP-only retry path**: skip steps b–f and jump straight to step g.
    b. Read `In-Reply-To`. If it matches a row in `pending_prompts`, the entry's date is that prompt's date. Otherwise use the message's `Date` header (in configured timezone) and log a warning. (`restore-imap` exercises this fallback for replies whose original prompt rows have been pruned.)
@@ -225,8 +225,8 @@ SQLite runs in **WAL mode** with a 5s busy-handler so the host-side backup scrip
       - **`sources`** = chronological list of `raw/*.eml` filenames.
       - **Body** = concatenation of parsed sections from each source, separated by `---`.
    f. Upsert SQLite: `entries`, `tags`, `media`, `ingested_messages` (with `imap_moved=0`).
-   g. IMAP: copy message to `Journal/Processed`, mark deleted in `Journal/Inbox`, EXPUNGE. On success, set `ingested_messages.imap_moved=1`.
-3. On any per-message failure during steps b–f: roll back filesystem writes for that message (no `entry.md` mutation, no `raw.eml` written, no SQLite row), leave the message UNSEEN in `Journal/Inbox`, log error with `Message-ID`, continue with next message. On step-g failure: filesystem and SQLite already reflect ingestion, but `imap_moved=0` flags the message for an IMAP-only retry on the next poll (the step-2a guard reaches step g without re-running ingestion).
+   g. IMAP: copy message to `Driftnote/Processed`, mark deleted in `Driftnote/Inbox`, EXPUNGE. On success, set `ingested_messages.imap_moved=1`.
+3. On any per-message failure during steps b–f: roll back filesystem writes for that message (no `entry.md` mutation, no `raw.eml` written, no SQLite row), leave the message UNSEEN in `Driftnote/Inbox`, log error with `Message-ID`, continue with next message. On step-g failure: filesystem and SQLite already reflect ingestion, but `imap_moved=0` flags the message for an IMAP-only retry on the next poll (the step-2a guard reaches step g without re-running ingestion).
 
 ### C. Web UI
 
@@ -246,19 +246,19 @@ All routes (in non-dev) require valid `Cf-Access-Jwt-Assertion` header verified 
 
 Each digest type independently enabled in config. Cron defaults: weekly Mon 08:00, monthly 1st 08:00, yearly Jan 1 08:00.
 
-- **Weekly:** subject `[Journal] Week of Mon DD MMM → Sun DD MMM`. 7-emoji moodboard row. Per-day section with date heading, emoji, body HTML, inline thumbnails (CID-attached, link to web UI for full-size). Tag chips footer.
-- **Monthly:** subject `[Journal] Month YYYY`. Calendar-grid moodboard (rows = weeks). Stats line (entries / total days, top emoji, top tags). Up to 6 highlight days, target minimum 4. Selection is progressive: first take days that have photos *and* at least one rare tag (used <3 times that month); if fewer than 4 qualify, relax to days with photos *or* a rare tag; if still fewer than 4, fall back to the days with the most photos. Emit whatever count results — there is no padding with empty highlights. Each highlight: date, emoji, first ~2 sentences, one inline thumbnail. Link to web UI for full month.
-- **Yearly:** subject `[Journal] YYYY in review`. GitHub-style 52-week × 7-day emoji grid. Stats: total entries, longest streak, top 10 emojis, top 10 tags. One photo per month (most-tagged day's first photo, fallback to any photo). Link to web UI.
+- **Weekly:** subject `[Driftnote] Week of Mon DD MMM → Sun DD MMM`. 7-emoji moodboard row. Per-day section with date heading, emoji, body HTML, inline thumbnails (CID-attached, link to web UI for full-size). Tag chips footer.
+- **Monthly:** subject `[Driftnote] Month YYYY`. Calendar-grid moodboard (rows = weeks). Stats line (entries / total days, top emoji, top tags). Up to 6 highlight days, target minimum 4. Selection is progressive: first take days that have photos *and* at least one rare tag (used <3 times that month); if fewer than 4 qualify, relax to days with photos *or* a rare tag; if still fewer than 4, fall back to the days with the most photos. Emit whatever count results — there is no padding with empty highlights. Each highlight: date, emoji, first ~2 sentences, one inline thumbnail. Link to web UI for full month.
+- **Yearly:** subject `[Driftnote] YYYY in review`. GitHub-style 52-week × 7-day emoji grid. Stats: total entries, longest streak, top 10 emojis, top 10 tags. One photo per month (most-tagged day's first photo, fallback to any photo). Link to web UI.
 
 Each digest run records a `job_runs` row.
 
 ### E. Backup (host-side systemd timer, monthly)
 
-1. `systemd-tmpfiles` ensures `/var/journal/backups/` exists with correct mode.
-2. Timer fires `journal-backup.service` on the 1st at 03:00:
-   - `tar --zstd -cf .../journal-YYYY-MM.tar.zst -C /var/journal config.toml data/entries`
+1. `systemd-tmpfiles` ensures `/var/driftnote/backups/` exists with correct mode.
+2. Timer fires `driftnote-backup.service` on the 1st at 03:00:
+   - `tar --zstd -cf .../driftnote-YYYY-MM.tar.zst -C /var/driftnote config.toml data/entries`
    - If `backup.encrypt=true`, pipe through `age -p` using the configured key path.
-   - Prune local `backups/journal-*.tar.zst` files older than `backup.retain_months` (default **12**).
+   - Prune local `backups/driftnote-*.tar.zst` files older than `backup.retain_months` (default **12**).
    - Write a `job_runs` row directly into `data/index.sqlite` (WAL-safe).
 3. Service `OnFailure=` invokes `scripts/alert-email.py` to self-email via SMTP.
 
@@ -275,23 +275,23 @@ Each digest run records a `job_runs` row.
 
 ### Prod (RPi)
 
-- Image built from `Containerfile` and pushed to `ghcr.io/<you>/journal:latest` by GitHub Actions on `master`.
+- Image built from `Containerfile` and pushed to `ghcr.io/<you>/driftnote:latest` by GitHub Actions on `master`.
 - RPi pulls and runs as a systemd quadlet:
 
 ```ini
-# /etc/containers/systemd/journal.container
+# /etc/containers/systemd/driftnote.container
 [Unit]
-Description=Journal app
+Description=Driftnote app
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/<you>/journal:latest
-Volume=/var/journal:/var/journal:Z
-Environment=JOURNAL_CONFIG=/var/journal/config.toml
-EnvironmentFile=/etc/journal/journal.env
+Image=ghcr.io/<you>/driftnote:latest
+Volume=/var/driftnote:/var/driftnote:Z
+Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
+EnvironmentFile=/etc/driftnote/driftnote.env
 PublishPort=127.0.0.1:8000:8000
-# Command line comes from the image's CMD (uvicorn journal.app:app --host 0.0.0.0 --port 8000).
+# Command line comes from the image's CMD (uvicorn driftnote.app:app --host 0.0.0.0 --port 8000).
 # Quadlet directive names vary across podman versions; verify with `man podman-systemd.unit`
 # on the deployment host.
 
@@ -303,11 +303,11 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-- `cloudflared` runs as a separate systemd service routing `journal.<your-domain>` → `http://127.0.0.1:8000` (existing pattern from another app).
+- `cloudflared` runs as a separate systemd service routing `driftnote.<your-domain>` → `http://127.0.0.1:8000` (existing pattern from another app).
 - Cloudflare Access policy: `email is <you>`.
 - Backup timer + service installed under `/etc/systemd/system/`.
 
-### Configuration file (`/var/journal/config.toml`)
+### Configuration file (`/var/driftnote/config.toml`)
 
 ```toml
 [schedule]                              # cron syntax, evaluated in [timezone]
@@ -319,10 +319,10 @@ imap_poll      = "*/5 * * * *"
 timezone       = "Europe/London"
 
 [email]
-imap_folder            = "Journal/Inbox"
-imap_processed_folder  = "Journal/Processed"
+imap_folder            = "Driftnote/Inbox"
+imap_processed_folder  = "Driftnote/Processed"
 recipient              = "you@gmail.com"
-sender_name            = "Your Journal"
+sender_name            = "Driftnote"
 imap_host              = "imap.gmail.com"
 imap_port              = 993
 imap_tls               = true
@@ -331,7 +331,7 @@ smtp_port              = 587
 smtp_starttls          = true
 
 [prompt]
-subject_template = "[Journal] How was {date}?"
+subject_template = "[Driftnote] How was {date}?"
 body_template    = "templates/prompt.md.j2"
 
 [parsing]
@@ -356,25 +356,25 @@ alert_percent = 95
 check_cron    = "0 */6 * * *"
 ```
 
-### Secrets (`/etc/journal/journal.env`, mode 0600, root-owned)
+### Secrets (`/etc/driftnote/driftnote.env`, mode 0600, root-owned)
 
 ```
-JOURNAL_GMAIL_USER=you@gmail.com
-JOURNAL_GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-JOURNAL_CF_ACCESS_AUD=<application-AUD-tag>
-JOURNAL_CF_TEAM_DOMAIN=<your-team>.cloudflareaccess.com
-JOURNAL_AGE_KEY_PATH=/etc/journal/backup.age.key   # only if encrypted
+DRIFTNOTE_GMAIL_USER=you@gmail.com
+DRIFTNOTE_GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+DRIFTNOTE_CF_ACCESS_AUD=<application-AUD-tag>
+DRIFTNOTE_CF_TEAM_DOMAIN=<your-team>.cloudflareaccess.com
+DRIFTNOTE_AGE_KEY_PATH=/etc/driftnote/backup.age.key   # only if encrypted
 ```
 
 App startup validates secrets and fails fast on missing/malformed values.
 
 ### Setup walkthrough (will be in README)
 
-1. **Gmail App Password.** Google Account → Security → 2-Step Verification (must be on) → App passwords → "Mail / Other (Journal)" → save the 16-char password.
-2. **Gmail filter + labels.** Create labels `Journal/Inbox` and `Journal/Processed`. Settings → Filters and Blocked Addresses → Create filter: `subject:"[Journal]"` `from:me` → action: Apply label "Journal/Inbox", Skip Inbox.
-3. **Cloudflare Access.** Zero Trust dashboard → Access → Applications → Add → Self-hosted → domain `journal.<yours>` → Policy "Owner" with `email is <you>` → save. Copy Application AUD tag.
-4. **RPi prep.** `sudo mkdir -p /var/journal/{data,backups}`; `sudo chown <user> /var/journal/{data,backups}`. Drop in `config.toml` and `journal.env`. (Logs go to journald; no private log directory is needed — see §6 logging.)
-5. **Systemd.** Install quadlet + backup unit files, then `systemctl daemon-reload && systemctl enable --now journal.container journal-backup.timer`.
+1. **Gmail App Password.** Google Account → Security → 2-Step Verification (must be on) → App passwords → "Mail / Other (Driftnote)" → save the 16-char password.
+2. **Gmail filter + labels.** Create labels `Driftnote/Inbox` and `Driftnote/Processed`. Settings → Filters and Blocked Addresses → Create filter: `subject:"[Driftnote]"` `from:me` → action: Apply label "Driftnote/Inbox", Skip Inbox.
+3. **Cloudflare Access.** Zero Trust dashboard → Access → Applications → Add → Self-hosted → domain `driftnote.<yours>` → Policy "Owner" with `email is <you>` → save. Copy Application AUD tag.
+4. **RPi prep.** `sudo mkdir -p /var/driftnote/{data,backups}`; `sudo chown <user> /var/driftnote/{data,backups}`. Drop in `config.toml` and `driftnote.env`. (Logs go to journald; no private log directory is needed — see §6 logging.)
+5. **Systemd.** Install quadlet + backup unit files, then `systemctl daemon-reload && systemctl enable --now driftnote.container driftnote-backup.timer`.
 
 ---
 
@@ -418,7 +418,7 @@ App startup validates secrets and fails fast on missing/malformed values.
 
 ### Manual smoke checks (in `docs/runbook.md`)
 
-After every prod deploy: send a test email with mood + photo, watch logs, verify in web UI; send afterthought reply and verify append; edit via UI and verify markdown updated; run `journal reindex` and verify idempotency.
+After every prod deploy: send a test email with mood + photo, watch logs, verify in web UI; send afterthought reply and verify append; edit via UI and verify markdown updated; run `driftnote reindex` and verify idempotency.
 
 ---
 
@@ -441,7 +441,7 @@ Structured JSON to stdout (`structlog`); journald captures via systemd. Each lin
 | Corrupt image / unreadable HEIC | derivative generation | WARNING; original kept; web/thumb skipped; UI placeholder. |
 | Video has no decodable first frame | ffmpeg poster step | WARNING; thumb falls back to generic icon; original still playable. |
 | Two replies for same date concurrently | ingestion | per-date `fcntl.flock` on entry directory serializes; both `raw.eml` files saved. |
-| User edits `entry.md` on disk | next page load reads stale SQLite | documented: edit via UI; CLI `journal reindex` is the recovery for hand-edits. |
+| User edits `entry.md` on disk | next page load reads stale SQLite | documented: edit via UI; CLI `driftnote reindex` is the recovery for hand-edits. |
 | SQLite locked | OperationalError | retry with 5s busy-handler; reindex CLI documented to run with app stopped. |
 | Cloudflare Access JWT invalid | middleware | 403; INFO log unless threshold exceeded. |
 | Backup script fails | timer service exit non-zero | systemd notifies; standalone backup script also self-emails. |
@@ -465,7 +465,7 @@ Structured JSON to stdout (`structlog`); journald captures via systemd. Each lin
 
 ### Disk monitoring
 
-- Job `disk_check` runs per `disk.check_cron` (default every 6h). `shutil.disk_usage("/var/journal/data")`.
+- Job `disk_check` runs per `disk.check_cron` (default every 6h). `shutil.disk_usage("/var/driftnote/data")`.
 - Each run records `{"used_bytes": ..., "total_bytes": ..., "percent": ...}` as JSON in `job_runs.detail`. Growth is computed by selecting `job_runs` rows where `job='disk_check' AND status='ok'` in the trailing 30 days, extracting `used_bytes` via SQLite's `json_extract(detail, '$.used_bytes')` to get a `(started_at, used_bytes)` series, then fitting a simple linear regression in Python (NumPy not required — closed-form OLS over <120 points).
 - On crossing 80% (transition from below), self-email **once** with current usage and the projected days-remaining from the regression. State tracked via `disk_state` table; re-alert only after dropping back below the threshold.
 - On 95% crossing, second email with stronger subject.
@@ -477,12 +477,12 @@ All self-emails (IMAP failure, disk threshold, backup failure) check `job_runs` 
 
 ### CLI tools
 
-- `journal reindex [--from-raw] [--force]`
+- `driftnote reindex [--from-raw] [--force]`
   - Default: walk `data/entries/`, parse every `entry.md`, rebuild `index.sqlite` from scratch.
   - `--from-raw`: also re-derive `entry.md` content from `raw/*.eml` (overwrites manual UI edits — requires `--force` if any entry has `updated_at > created_at`).
-- `journal restore-imap --since=YYYY-MM-DD [--until=YYYY-MM-DD]`
-  - Fetch matching emails from configured IMAP folders (`Journal/Inbox` + `Journal/Processed`); run them through normal ingestion. Idempotent via `ingested_messages`. Old replies whose `pending_prompts` rows have been pruned will hit the §3.B step-2b fallback (entry date taken from message `Date` header) — this is expected behavior, not a bug.
-- `journal send-prompt [--date=YYYY-MM-DD]`
+- `driftnote restore-imap --since=YYYY-MM-DD [--until=YYYY-MM-DD]`
+  - Fetch matching emails from configured IMAP folders (`Driftnote/Inbox` + `Driftnote/Processed`); run them through normal ingestion. Idempotent via `ingested_messages`. Old replies whose `pending_prompts` rows have been pruned will hit the §3.B step-2b fallback (entry date taken from message `Date` header) — this is expected behavior, not a bug.
+- `driftnote send-prompt [--date=YYYY-MM-DD]`
   - Manual trigger of a prompt for a given date (default: today). Useful if the scheduled job missed.
 
 ---
@@ -490,7 +490,7 @@ All self-emails (IMAP failure, disk threshold, backup failure) check `job_runs` 
 ## §7. Project structure
 
 ```
-journal/
+driftnote/
 ├── pyproject.toml                  # uv-managed
 ├── uv.lock
 ├── README.md
@@ -507,14 +507,14 @@ journal/
 │   ├── backup.sh
 │   └── alert-email.py
 ├── deploy/
-│   ├── journal.container
-│   ├── journal-backup.service
-│   ├── journal-backup.timer
+│   ├── driftnote.container
+│   ├── driftnote-backup.service
+│   ├── driftnote-backup.timer
 │   └── README.md
 ├── config/
 │   ├── config.example.toml
 │   └── prompt.example.md.j2
-├── src/journal/
+├── src/driftnote/
 │   ├── __init__.py
 │   ├── app.py                      # FastAPI factory, middleware, lifespan
 │   ├── cli.py                      # typer: serve, reindex, restore-imap, send-prompt
@@ -603,7 +603,7 @@ journal/
 | Gmail App Passwords removed for personal accounts | `mail/transport.py` abstraction localizes a swap to OAuth (with the 7-day-or-verify trade-off). |
 | HEIC decoding requires `libheif` on aarch64 | Container image installs `libheif1`; CI runs HEIC fixture. |
 | `ffmpeg` required for video poster | Container installs `ffmpeg`; CI runs `.mov` fixture. |
-| User edits `entry.md` on disk while app runs | UI is the supported edit path; `journal reindex` is the documented recovery. |
+| User edits `entry.md` on disk while app runs | UI is the supported edit path; `driftnote reindex` is the documented recovery. |
 | `reindex --from-raw` overwrites UI edits | Prints warning; requires `--force` if any entry has `updated_at > created_at`. |
 | Cloudflare Tunnel down → web UI unreachable | App still ingests email and sends digests; tunnel restart is independent. |
 | Backup script + app concurrent SQLite writes | WAL mode + 5s busy-handler; backup writes one row per run. |
@@ -621,7 +621,7 @@ journal/
 - Browser push notifications.
 - LLM-generated summaries / sentiment analysis (deliberately out — journal is for the user's own reflection).
 - Encrypted-at-rest live data dir; only backup-time encryption is supported.
-- Restore-from-IMAP across folders other than `Journal/Inbox` and `Journal/Processed`.
+- Restore-from-IMAP across folders other than `Driftnote/Inbox` and `Driftnote/Processed`.
 
 ### Confirmed assumptions
 
