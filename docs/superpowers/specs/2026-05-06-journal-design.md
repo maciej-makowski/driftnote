@@ -163,6 +163,7 @@ CREATE TABLE ingested_messages (
   ingested_at TEXT NOT NULL,
   imap_moved  INTEGER NOT NULL DEFAULT 0   -- 0 = still in Inbox; 1 = moved to Processed
 );
+-- Partial index intentional: the hot set is messages stuck awaiting an IMAP-move retry.
 CREATE INDEX idx_ingested_imap_moved ON ingested_messages(imap_moved) WHERE imap_moved = 0;
 
 CREATE TABLE pending_prompts (
@@ -214,7 +215,7 @@ SQLite runs in **WAL mode** with a 5s busy-handler so the host-side backup scrip
 
 1. Connect IMAPS to `Journal/Inbox`, search `UNSEEN`.
 2. For each message:
-   a. Read `Message-ID`. If already in `ingested_messages` and `imap_moved=1`, skip entirely. If already in `ingested_messages` and `imap_moved=0`, skip steps b–f and jump straight to step g (IMAP move retry — see step 3).
+   a. Read `Message-ID`. If already in `ingested_messages` and `imap_moved=1`, skip entirely. If already in `ingested_messages` and `imap_moved=0`, take the **IMAP-only retry path**: skip steps b–f and jump straight to step g.
    b. Read `In-Reply-To`. If it matches a row in `pending_prompts`, the entry's date is that prompt's date. Otherwise use the message's `Date` header (in configured timezone) and log a warning. (`restore-imap` exercises this fallback for replies whose original prompt rows have been pruned.)
    c. Strip quoted text (heuristic: lines after `On … wrote:` plus `>`-prefixed lines).
    d. Extract: mood (configured regex), tags (configured regex), body, attachments.
@@ -372,7 +373,7 @@ App startup validates secrets and fails fast on missing/malformed values.
 1. **Gmail App Password.** Google Account → Security → 2-Step Verification (must be on) → App passwords → "Mail / Other (Journal)" → save the 16-char password.
 2. **Gmail filter + labels.** Create labels `Journal/Inbox` and `Journal/Processed`. Settings → Filters and Blocked Addresses → Create filter: `subject:"[Journal]"` `from:me` → action: Apply label "Journal/Inbox", Skip Inbox.
 3. **Cloudflare Access.** Zero Trust dashboard → Access → Applications → Add → Self-hosted → domain `journal.<yours>` → Policy "Owner" with `email is <you>` → save. Copy Application AUD tag.
-4. **RPi prep.** `sudo mkdir -p /var/journal/{data,backups,logs}`; `sudo chown <user> /var/journal/{data,backups,logs}`. Drop in `config.toml` and `journal.env`.
+4. **RPi prep.** `sudo mkdir -p /var/journal/{data,backups}`; `sudo chown <user> /var/journal/{data,backups}`. Drop in `config.toml` and `journal.env`. (Logs go to journald; no private log directory is needed — see §6 logging.)
 5. **Systemd.** Install quadlet + backup unit files, then `systemctl daemon-reload && systemctl enable --now journal.container journal-backup.timer`.
 
 ---
@@ -465,7 +466,7 @@ Structured JSON to stdout (`structlog`); journald captures via systemd. Each lin
 ### Disk monitoring
 
 - Job `disk_check` runs per `disk.check_cron` (default every 6h). `shutil.disk_usage("/var/journal/data")`.
-- Each run records `{"used_bytes": ..., "total_bytes": ..., "percent": ...}` as JSON in `job_runs.detail`. Growth is computed by querying `job_runs` for `disk_check` rows in the trailing 30 days and fitting a simple linear regression on `(started_at, used_bytes)`.
+- Each run records `{"used_bytes": ..., "total_bytes": ..., "percent": ...}` as JSON in `job_runs.detail`. Growth is computed by selecting `job_runs` rows where `job='disk_check' AND status='ok'` in the trailing 30 days, extracting `used_bytes` via SQLite's `json_extract(detail, '$.used_bytes')` to get a `(started_at, used_bytes)` series, then fitting a simple linear regression in Python (NumPy not required — closed-form OLS over <120 points).
 - On crossing 80% (transition from below), self-email **once** with current usage and the projected days-remaining from the regression. State tracked via `disk_state` table; re-alert only after dropping back below the threshold.
 - On 95% crossing, second email with stronger subject.
 - Both thresholds also surface in admin panel.
