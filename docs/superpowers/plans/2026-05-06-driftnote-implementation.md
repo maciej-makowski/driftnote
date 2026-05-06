@@ -7792,3 +7792,1404 @@ git commit -m "feat(digest): wire weekly/monthly/yearly to SMTP send"
 - [ ] 5 task commits in this chunk with conventional-commit prefixes.
 
 **Hand-off:** Chunk 9 (web layer) follows. Chunks 8 and 9 had no shared dependencies and could have run in parallel from the end of Chunk 7.
+
+---
+
+## Chunk 9: Web layer
+
+**Outcome of this chunk:** A FastAPI app surface with: Cloudflare Access JWT middleware (skipped in dev); `/healthz` + `/readyz`; calendar/entry/tags/search browse; entry edit; media serving (original/web/thumb); admin dashboard with banners. Server-rendered Jinja2 + HTMX, no SPA build.
+
+### Task 9.1: `web/auth.py` — Cloudflare Access JWT middleware
+
+**Files:**
+- Create: `src/driftnote/web/__init__.py`
+- Create: `src/driftnote/web/auth.py`
+- Create: `tests/unit/test_web_auth.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for Cloudflare Access JWT middleware."""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import jwt
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from driftnote.web.auth import CloudflareAccessAuth, install_cf_access_middleware
+
+
+def _hs256_token(secret: str, *, aud: str, exp_offset: int = 60, **extras: Any) -> str:
+    payload = {"aud": aud, "iat": int(time.time()), "exp": int(time.time()) + exp_offset, **extras}
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _build(app: FastAPI, *, environment: str, audience: str = "aud", team_domain: str = "t.example.com") -> FastAPI:
+    auth = CloudflareAccessAuth(
+        audience=audience,
+        team_domain=team_domain,
+        environment=environment,
+        # Test override: validate via shared HS256 secret so we don't need JWKS HTTP.
+        signing_keys={"k1": "shared-secret"},
+        algorithms=["HS256"],
+    )
+    install_cf_access_middleware(app, auth)
+    return app
+
+
+def test_dev_environment_bypasses_jwt() -> None:
+    app = FastAPI()
+    @app.get("/x")
+    async def _x() -> dict[str, str]:
+        return {"ok": "yes"}
+    _build(app, environment="dev")
+    r = TestClient(app).get("/x")
+    assert r.status_code == 200
+
+
+def test_prod_rejects_missing_jwt() -> None:
+    app = FastAPI()
+    @app.get("/x")
+    async def _x() -> dict[str, str]:
+        return {"ok": "yes"}
+    _build(app, environment="prod")
+    r = TestClient(app).get("/x")
+    assert r.status_code == 403
+    assert r.json()["detail"] == "missing access token"
+
+
+def test_prod_accepts_valid_jwt() -> None:
+    app = FastAPI()
+    @app.get("/x")
+    async def _x() -> dict[str, str]:
+        return {"ok": "yes"}
+    _build(app, environment="prod")
+    token = _hs256_token("shared-secret", aud="aud", email="me@example.com")
+    r = TestClient(app).get("/x", headers={"Cf-Access-Jwt-Assertion": token})
+    assert r.status_code == 200
+
+
+def test_prod_rejects_wrong_audience() -> None:
+    app = FastAPI()
+    @app.get("/x")
+    async def _x() -> dict[str, str]:
+        return {"ok": "yes"}
+    _build(app, environment="prod")
+    bad = _hs256_token("shared-secret", aud="someone-else")
+    r = TestClient(app).get("/x", headers={"Cf-Access-Jwt-Assertion": bad})
+    assert r.status_code == 403
+
+
+def test_prod_rejects_expired_jwt() -> None:
+    app = FastAPI()
+    @app.get("/x")
+    async def _x() -> dict[str, str]:
+        return {"ok": "yes"}
+    _build(app, environment="prod")
+    expired = _hs256_token("shared-secret", aud="aud", exp_offset=-1)
+    r = TestClient(app).get("/x", headers={"Cf-Access-Jwt-Assertion": expired})
+    assert r.status_code == 403
+
+
+def test_health_endpoints_skip_auth() -> None:
+    app = FastAPI()
+    @app.get("/healthz")
+    async def _hz() -> dict[str, str]:
+        return {"status": "ok"}
+    _build(app, environment="prod")
+    r = TestClient(app).get("/healthz")
+    assert r.status_code == 200
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/unit/test_web_auth.py -v`
+
+- [ ] **Step 3: Implement `src/driftnote/web/__init__.py`** (empty)
+
+```python
+"""Web layer: FastAPI routes, auth middleware, templates."""
+```
+
+- [ ] **Step 4: Implement `src/driftnote/web/auth.py`**
+
+```python
+"""Cloudflare Access JWT verification middleware.
+
+In production, the `Cf-Access-Jwt-Assertion` header is verified against
+Cloudflare's JWKS endpoint at `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
+For tests we substitute static signing keys + HS256 to avoid network IO.
+In dev (`environment='dev'`), the middleware bypasses verification entirely.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+import jwt
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
+_SKIP_PATHS = ("/healthz", "/readyz")
+
+
+@dataclass
+class CloudflareAccessAuth:
+    audience: str
+    team_domain: str
+    environment: str = "prod"
+    signing_keys: dict[str, str] | None = None  # for tests
+    algorithms: list[str] = field(default_factory=lambda: ["RS256"])
+    _jwks_cache: dict[str, str] = field(default_factory=dict)
+    _jwks_cached_at: float = 0.0
+
+    @property
+    def issuer(self) -> str:
+        return f"https://{self.team_domain}"
+
+    @property
+    def jwks_url(self) -> str:
+        return f"{self.issuer}/cdn-cgi/access/certs"
+
+    def _resolve_key(self, kid: str) -> str | None:
+        if self.signing_keys is not None:
+            return self.signing_keys.get(kid) or next(iter(self.signing_keys.values()), None)
+        # JWKS cache (1h TTL)
+        if not self._jwks_cache or time.time() - self._jwks_cached_at > 3600:
+            try:
+                resp = httpx.get(self.jwks_url, timeout=5.0)
+                resp.raise_for_status()
+                payload = resp.json()
+            except (httpx.HTTPError, ValueError):
+                return None
+            cache: dict[str, str] = {}
+            for jwk in payload.get("keys", []):
+                key_id = jwk.get("kid", "")
+                cache[key_id] = jwt.algorithms.RSAAlgorithm.from_jwk(jwk)  # type: ignore[arg-type]
+            self._jwks_cache = cache
+            self._jwks_cached_at = time.time()
+        return self._jwks_cache.get(kid)
+
+    def verify(self, token: str) -> dict[str, Any]:
+        try:
+            unverified = jwt.get_unverified_header(token)
+        except jwt.InvalidTokenError as exc:
+            raise PermissionError(f"malformed token: {exc}") from exc
+        kid = unverified.get("kid", "")
+        key = self._resolve_key(kid)
+        if key is None:
+            raise PermissionError("signing key not found")
+        try:
+            return jwt.decode(token, key, algorithms=self.algorithms, audience=self.audience)
+        except jwt.InvalidTokenError as exc:
+            raise PermissionError(f"invalid token: {exc}") from exc
+
+
+class _CFAccessMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: FastAPI, auth: CloudflareAccessAuth) -> None:
+        super().__init__(app)
+        self.auth = auth
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Any]],
+    ) -> Any:
+        if self.auth.environment == "dev":
+            return await call_next(request)
+        if request.url.path in _SKIP_PATHS:
+            return await call_next(request)
+        token = request.headers.get("Cf-Access-Jwt-Assertion")
+        if not token:
+            return JSONResponse({"detail": "missing access token"}, status_code=403)
+        try:
+            self.auth.verify(token)
+        except PermissionError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=403)
+        return await call_next(request)
+
+
+def install_cf_access_middleware(app: FastAPI, auth: CloudflareAccessAuth) -> None:
+    app.add_middleware(_CFAccessMiddleware, auth=auth)
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_web_auth.py -v`
+Expected: 6 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/web/__init__.py src/driftnote/web/auth.py tests/unit/test_web_auth.py
+git commit -m "feat(web): Cloudflare Access JWT middleware with dev bypass"
+```
+
+---
+
+### Task 9.2: `web/routes_health.py` + `web/banners.py` — health endpoints + banner state
+
+**Files:**
+- Create: `src/driftnote/web/routes_health.py`
+- Create: `src/driftnote/web/banners.py`
+- Create: `tests/unit/test_web_banners.py`
+- Create: `tests/integration/test_web_routes_health.py`
+
+- [ ] **Step 1: Write failing test for banners**
+
+```python
+"""Tests for banner state derivation."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.jobs import finish_job_run, record_job_run
+from driftnote.repository.ingested import record_threshold_crossed
+from driftnote.web.banners import Banner, compute_banners
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    return eng
+
+
+def test_no_banners_for_clean_state(engine: Engine) -> None:
+    banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
+    assert banners == []
+
+
+def test_unacknowledged_failure_in_last_7_days(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-05T12:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-05-05T12:00:01Z", status="error", error_kind="imap_auth")
+    banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
+    levels = [b.level for b in banners]
+    assert "error" in levels
+
+
+def test_old_failure_outside_window_does_not_show(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-04-01T12:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-04-01T12:00:01Z", status="error", error_kind="imap_auth")
+    banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
+    assert all(b.level != "error" for b in banners)
+
+
+def test_disk_threshold_crossed_shows_warning(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        record_threshold_crossed(session, threshold=80, at="2026-05-06T03:00:00Z")
+    banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
+    assert any(b.level == "warn" and "disk" in b.message.lower() for b in banners)
+
+
+def test_no_recent_backup_warning(engine: Engine) -> None:
+    """If backup hasn't succeeded in >35 days, surface an amber banner."""
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="backup", started_at="2026-03-01T03:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-03-01T03:00:10Z", status="ok")
+    banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
+    assert any(b.level == "warn" and "backup" in b.message.lower() for b in banners)
+```
+
+- [ ] **Step 2: Write failing test for health endpoints**
+
+```python
+"""Smoke test that /healthz + /readyz are wired and return JSON."""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from driftnote.web.routes_health import install_health_routes
+
+
+def test_healthz_returns_ok() -> None:
+    app = FastAPI()
+    install_health_routes(app, db_ok=lambda: True, last_imap_poll_status=lambda: ("2026-05-06T20:55:00Z", "ok"))
+    r = TestClient(app).get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["last_imap_poll_status"] == "ok"
+
+
+def test_healthz_reports_db_failure() -> None:
+    app = FastAPI()
+    install_health_routes(app, db_ok=lambda: False, last_imap_poll_status=lambda: (None, None))
+    r = TestClient(app).get("/healthz")
+    body = r.json()
+    assert body["db"] == "error"
+
+
+def test_readyz_only_returns_when_ready() -> None:
+    app = FastAPI()
+    state = {"ready": False}
+    install_health_routes(
+        app,
+        db_ok=lambda: True,
+        last_imap_poll_status=lambda: (None, None),
+        readiness=lambda: state["ready"],
+    )
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 503
+    state["ready"] = True
+    r = TestClient(app).get("/readyz")
+    assert r.status_code == 200
+```
+
+- [ ] **Step 3: Implement `src/driftnote/web/banners.py`**
+
+```python
+"""Banner state derived from job_runs + disk_state."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.repository.ingested import get_threshold_crossed_at
+from driftnote.repository.jobs import last_successful_run, recent_failures
+
+
+@dataclass(frozen=True)
+class Banner:
+    level: str       # 'error' | 'warn'
+    message: str
+    link: str | None = None
+
+
+def compute_banners(engine: Engine, *, now: str) -> list[Banner]:
+    out: list[Banner] = []
+
+    with session_scope(engine) as session:
+        unack = recent_failures(session, now=now, days=7, only_unacknowledged=True)
+    if unack:
+        out.append(
+            Banner(
+                level="error",
+                message=f"{len(unack)} unacknowledged failure(s) in the last 7 days.",
+                link="/admin",
+            )
+        )
+
+    with session_scope(engine) as session:
+        last_backup = last_successful_run(session, "backup")
+    if last_backup is None or _days_since(last_backup.started_at, now) > 35:
+        out.append(Banner(level="warn", message="Last successful backup is older than 35 days.", link="/admin"))
+
+    with session_scope(engine) as session:
+        warn_at = get_threshold_crossed_at(session, 80)
+        alert_at = get_threshold_crossed_at(session, 95)
+    if alert_at is not None:
+        out.append(Banner(level="error", message="Disk usage above 95%.", link="/admin"))
+    elif warn_at is not None:
+        out.append(Banner(level="warn", message="Disk usage above 80%.", link="/admin"))
+
+    return out
+
+
+def _days_since(iso: str, now: str) -> float:
+    a = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    b = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    return (b - a).total_seconds() / 86400.0
+```
+
+- [ ] **Step 4: Implement `src/driftnote/web/routes_health.py`**
+
+```python
+"""Health and readiness HTTP routes."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from fastapi import FastAPI, Response
+
+
+def install_health_routes(
+    app: FastAPI,
+    *,
+    db_ok: Callable[[], bool],
+    last_imap_poll_status: Callable[[], tuple[str | None, str | None]],
+    readiness: Callable[[], bool] | None = None,
+) -> None:
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str | None]:
+        last_at, last_status = last_imap_poll_status()
+        return {
+            "status": "ok",
+            "db": "ok" if db_ok() else "error",
+            "last_imap_poll": last_at,
+            "last_imap_poll_status": last_status,
+        }
+
+    if readiness is None:
+        @app.get("/readyz")
+        async def readyz_default() -> dict[str, str]:
+            return {"status": "ok"}
+    else:
+        @app.get("/readyz")
+        async def readyz_dyn(response: Response) -> dict[str, str]:
+            if not readiness():
+                response.status_code = 503
+                return {"status": "starting"}
+            return {"status": "ok"}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/unit/test_web_banners.py tests/integration/test_web_routes_health.py -v`
+Expected: 8 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/web/banners.py src/driftnote/web/routes_health.py tests/unit/test_web_banners.py tests/integration/test_web_routes_health.py
+git commit -m "feat(web): banner state + /healthz and /readyz endpoints"
+```
+
+---
+
+### Task 9.3: Templates + static assets + minimal browse routes
+
+**Files:**
+- Create: `src/driftnote/web/templates/base.html.j2`
+- Create: `src/driftnote/web/templates/calendar.html.j2`
+- Create: `src/driftnote/web/templates/entry.html.j2`
+- Create: `src/driftnote/web/templates/tags.html.j2`
+- Create: `src/driftnote/web/templates/search.html.j2`
+- Create: `src/driftnote/web/static/style.css`
+- Create: `src/driftnote/web/static/htmx.min.js` (vendor; download in step)
+- Create: `src/driftnote/web/routes_browse.py`
+- Create: `tests/integration/test_web_routes_browse.py`
+
+The full template set is included so the executor doesn't need to invent layout. Polish CSS as desired in a follow-up task; nothing here is meant to be "final design".
+
+- [ ] **Step 1: Vendor htmx**
+
+```bash
+curl -L -o src/driftnote/web/static/htmx.min.js https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js
+test -s src/driftnote/web/static/htmx.min.js
+```
+
+- [ ] **Step 2: Create `base.html.j2`**
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Driftnote{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Driftnote</a>
+    <nav>
+      <a href="/">Calendar</a>
+      <a href="/tags">Tags</a>
+      <a href="/search">Search</a>
+      <a href="/admin">Admin</a>
+    </nav>
+  </header>
+  {% if banners %}
+    <section class="banners">
+      {% for b in banners %}
+        <div class="banner banner-{{ b.level }}">
+          {{ b.message }}
+          {% if b.link %}<a href="{{ b.link }}">view</a>{% endif %}
+        </div>
+      {% endfor %}
+    </section>
+  {% endif %}
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>
+```
+
+- [ ] **Step 3: Create `calendar.html.j2`, `entry.html.j2`, `tags.html.j2`, `search.html.j2`**
+
+`calendar.html.j2`:
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}{{ year }}-{{ "%02d"|format(month) }} — Driftnote{% endblock %}
+{% block content %}
+<h1>{{ month_name }} {{ year }}</h1>
+<nav class="month-nav">
+  <a href="/?year={{ prev_year }}&month={{ prev_month }}">‹ prev</a>
+  <a href="/?year={{ next_year }}&month={{ next_month }}">next ›</a>
+</nav>
+<table class="calendar">
+  <thead><tr>
+    {% for label in ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] %}<th>{{ label }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+    {% for row in cells %}
+      <tr>
+      {% for c in row %}
+        <td class="{% if not c.in_month %}dim{% endif %}">
+          {% if c.in_month %}
+            <a href="/entry/{{ c.date.isoformat() }}">
+              <div class="dom">{{ c.day_of_month }}</div>
+              <div class="emoji">{{ c.emoji or "·" }}</div>
+            </a>
+          {% endif %}
+        </td>
+      {% endfor %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+```
+
+`entry.html.j2`:
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}{{ entry.date }} — Driftnote{% endblock %}
+{% block content %}
+<article class="entry">
+  <h1>{{ entry.date }} {% if entry.mood %}<span class="mood">{{ entry.mood }}</span>{% endif %}</h1>
+  <p class="tags">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
+  <div class="body">{{ body_html|safe }}</div>
+  <section class="media">
+    {% for m in media if m.kind == "photo" %}
+      <a href="/media/{{ entry.date }}/web/{{ m.filename | replace('.heic', '.jpg') }}">
+        <img src="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.heic', '.jpg') }}" alt="">
+      </a>
+    {% endfor %}
+    {% for m in media if m.kind == "video" %}
+      <video controls preload="none" poster="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.', '_') }}.jpg">
+        <source src="/media/{{ entry.date }}/original/{{ m.filename }}">
+      </video>
+    {% endfor %}
+  </section>
+  <p><a href="/entry/{{ entry.date }}/edit">Edit</a></p>
+</article>
+{% endblock %}
+```
+
+`tags.html.j2`:
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}Tags — Driftnote{% endblock %}
+{% block content %}
+<h1>Tags</h1>
+<ul class="tag-cloud">
+  {% for tag, count in tags %}
+    <li><a href="/?tag={{ tag }}" style="font-size:{{ 0.8 + (count*0.1) }}rem">#{{ tag }} ({{ count }})</a></li>
+  {% endfor %}
+</ul>
+{% endblock %}
+```
+
+`search.html.j2`:
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}Search — Driftnote{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form method="get" action="/search">
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" autofocus>
+  <button>Search</button>
+</form>
+<ul class="search-results">
+  {% for e in results %}
+    <li><a href="/entry/{{ e.date }}">{{ e.date }} {{ e.mood or "" }}</a> — {{ e.body_text|truncate(160) }}</li>
+  {% endfor %}
+</ul>
+{% endblock %}
+```
+
+- [ ] **Step 4: Create `static/style.css`** (minimal, focused)
+
+```css
+:root { --bg:#fafafa; --fg:#222; --muted:#888; --warn:#f5c542; --error:#e74c3c; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
+       margin: 0; padding: 0 16px; max-width: 960px; margin-inline: auto; }
+.topbar { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #eee; }
+.topbar nav a { margin-left: 12px; color: var(--fg); text-decoration: none; }
+.brand { font-weight: 700; text-decoration: none; color: var(--fg); }
+.banners { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.banner { padding: 8px 12px; border-radius: 6px; }
+.banner-warn  { background: #fff8e0; border-left: 4px solid var(--warn); }
+.banner-error { background: #fdecea; border-left: 4px solid var(--error); }
+.calendar { width: 100%; border-collapse: collapse; }
+.calendar th, .calendar td { padding: 4px; text-align: center; border: 1px solid #eee; height: 56px; }
+.calendar td.dim { color: #ccc; }
+.calendar .emoji { font-size: 20px; }
+.calendar .dom { font-size: 11px; color: var(--muted); }
+.tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-cloud a { color: var(--fg); text-decoration: none; }
+.entry .mood { font-size: 26px; }
+.entry .tags a { color: var(--muted); margin-right: 6px; text-decoration: none; }
+.entry .media img { max-width: 240px; border-radius: 8px; margin: 4px; }
+.entry .media video { max-width: 100%; border-radius: 8px; }
+.search-results li { margin: 6px 0; }
+```
+
+- [ ] **Step 5: Implement `src/driftnote/web/routes_browse.py`**
+
+```python
+"""Calendar / entry / tags / search browse routes."""
+
+from __future__ import annotations
+
+import calendar as _cal
+from collections.abc import Callable
+from datetime import date as _date
+from html import escape
+from pathlib import Path
+
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.digest.inputs import DayInput
+from driftnote.digest.moodboard import monthly_moodboard_grid
+from driftnote.repository.entries import (
+    list_entries_by_month,
+    list_entries_by_tag,
+    list_entries_in_range,
+    search_fts,
+    tag_frequencies_in_range,
+    get_entry,
+)
+from driftnote.repository.media import list_media
+from driftnote.web.banners import compute_banners
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def install_browse_routes(
+    app: FastAPI,
+    *,
+    engine: Engine,
+    iso_now: Callable[[], str],
+) -> None:
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    def _ctx(request: Request, **extras) -> dict:
+        return {"request": request, "banners": compute_banners(engine, now=iso_now()), **extras}
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index(
+        request: Request,
+        year: int | None = Query(None),
+        month: int | None = Query(None),
+        tag: str | None = Query(None),
+    ):
+        if tag:
+            with session_scope(engine) as session:
+                entries = list_entries_by_tag(session, tag)
+            return templates.TemplateResponse(
+                "search.html.j2",
+                _ctx(request, q=f"#{tag}", results=entries),
+            )
+
+        today = _date.today()
+        y = year or today.year
+        m = month or today.month
+        with session_scope(engine) as session:
+            entries = list_entries_by_month(session, y, m)
+        days = [
+            DayInput(date=_date.fromisoformat(e.date), mood=e.mood, tags=[], photo_thumb=None, body_html="")
+            for e in entries
+        ]
+        cells = monthly_moodboard_grid(year=y, month=m, days=days)
+        prev_y, prev_m = (y, m - 1) if m > 1 else (y - 1, 12)
+        next_y, next_m = (y, m + 1) if m < 12 else (y + 1, 1)
+        return templates.TemplateResponse(
+            "calendar.html.j2",
+            _ctx(
+                request,
+                year=y, month=m, month_name=_cal.month_name[m],
+                cells=cells,
+                prev_year=prev_y, prev_month=prev_m,
+                next_year=next_y, next_month=next_m,
+            ),
+        )
+
+    @app.get("/entry/{date_str}", response_class=HTMLResponse)
+    async def entry_detail(request: Request, date_str: str):
+        with session_scope(engine) as session:
+            entry = get_entry(session, date_str)
+            media = list_media(session, date_str) if entry else []
+        if entry is None:
+            return HTMLResponse("Not found", status_code=404)
+        # Crude markdown → HTML rendering: handled inline for simplicity.
+        from markdown_it import MarkdownIt
+        md = MarkdownIt("commonmark")
+        body_html = md.render(entry.body_md)
+        # Tags via Tag table:
+        from driftnote.models import Tag
+        from sqlalchemy import select
+        with session_scope(engine) as session:
+            tag_rows = session.scalars(select(Tag).where(Tag.date == date_str)).all()
+        return templates.TemplateResponse(
+            "entry.html.j2",
+            _ctx(request, entry=entry, body_html=body_html, media=media, tags=[t.tag for t in tag_rows]),
+        )
+
+    @app.get("/tags", response_class=HTMLResponse)
+    async def tags_view(request: Request):
+        with session_scope(engine) as session:
+            freq = tag_frequencies_in_range(session, "0001-01-01", "9999-12-31")
+        ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+        return templates.TemplateResponse("tags.html.j2", _ctx(request, tags=ranked))
+
+    @app.get("/search", response_class=HTMLResponse)
+    async def search_view(request: Request, q: str | None = Query(None)):
+        results = []
+        if q:
+            with session_scope(engine) as session:
+                results = search_fts(session, q)
+        return templates.TemplateResponse("search.html.j2", _ctx(request, q=q, results=results))
+
+
+def install_static(app: FastAPI) -> None:
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+```
+
+- [ ] **Step 6: Write integration test**
+
+```python
+"""Smoke tests for the browse routes."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
+from driftnote.web.routes_browse import install_browse_routes, install_static
+
+
+@pytest.fixture
+def app_with_data(tmp_path: Path) -> tuple[FastAPI, Engine]:
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(session, EntryRecord(date="2026-05-06", mood="💪", body_text="risotto night", body_md="# Risotto night\n\nIt was great.", created_at="t", updated_at="t"))
+        replace_tags(session, "2026-05-06", ["work", "cooking"])
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    install_static(app)
+    return app, eng
+
+
+def test_calendar_page_renders(app_with_data) -> None:
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    assert "💪" in r.text
+
+
+def test_entry_page_renders_markdown(app_with_data) -> None:
+    app, _ = app_with_data
+    r = TestClient(app).get("/entry/2026-05-06")
+    assert r.status_code == 200
+    assert "<h1>Risotto night</h1>" in r.text
+    assert "#work" in r.text or "work" in r.text
+
+
+def test_tags_page_lists_tags(app_with_data) -> None:
+    app, _ = app_with_data
+    r = TestClient(app).get("/tags")
+    assert r.status_code == 200
+    assert "work" in r.text
+    assert "cooking" in r.text
+
+
+def test_search_returns_fts_hits(app_with_data) -> None:
+    app, _ = app_with_data
+    r = TestClient(app).get("/search?q=risotto")
+    assert r.status_code == 200
+    assert "2026-05-06" in r.text
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_web_routes_browse.py -v`
+Expected: 4 passed.
+
+- [ ] **Step 8: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/web/templates/ src/driftnote/web/static/ src/driftnote/web/routes_browse.py tests/integration/test_web_routes_browse.py
+git commit -m "feat(web): browse routes (calendar, entry, tags, search) + templates"
+```
+
+---
+
+### Task 9.4: `web/routes_edit.py` — entry editor with HTMX preview
+
+**Files:**
+- Create: `src/driftnote/web/routes_edit.py`
+- Create: `src/driftnote/web/templates/entry_edit.html.j2`
+- Create: `tests/integration/test_web_routes_edit.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Edit-route smoke tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.filesystem.markdown_io import EntryDocument, write_entry
+from driftnote.filesystem.layout import entry_paths_for
+from driftnote.repository.entries import EntryRecord, get_entry, upsert_entry
+from driftnote.web.routes_edit import install_edit_routes
+
+
+@pytest.fixture
+def app(tmp_path: Path) -> tuple[FastAPI, Engine, Path]:
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    data_root = tmp_path / "data"
+    # Pre-seed an entry on disk + index.
+    from datetime import date as _date
+    paths = entry_paths_for(data_root, _date(2026, 5, 6))
+    paths.dir.mkdir(parents=True, exist_ok=True)
+    write_entry(
+        paths.entry_md,
+        EntryDocument(
+            date=_date(2026, 5, 6), mood="💪", tags=["work"], created_at="t", updated_at="t",
+            sources=["raw/x.eml"], body="initial body\n",
+        ),
+    )
+    with session_scope(eng) as session:
+        upsert_entry(session, EntryRecord(date="2026-05-06", mood="💪", body_text="initial body", body_md="initial body", created_at="t", updated_at="t"))
+    app = FastAPI()
+    install_edit_routes(app, engine=eng, data_root=data_root, iso_now=lambda: "2026-05-07T08:00:00Z")
+    return app, eng, data_root
+
+
+def test_edit_form_renders(app) -> None:
+    fapp, _, _ = app
+    r = TestClient(fapp).get("/entry/2026-05-06/edit")
+    assert r.status_code == 200
+    assert "initial body" in r.text
+
+
+def test_edit_post_updates_entry_md_and_db(app) -> None:
+    fapp, eng, data_root = app
+    r = TestClient(fapp).post(
+        "/entry/2026-05-06",
+        data={"mood": "🎉", "tags": "work, party", "body": "updated body"},
+    )
+    assert r.status_code in (200, 303)
+    with session_scope(eng) as session:
+        entry = get_entry(session, "2026-05-06")
+    assert entry is not None
+    assert entry.mood == "🎉"
+    assert "updated body" in entry.body_md
+
+    from driftnote.filesystem.layout import entry_paths_for
+    from datetime import date as _date
+    md_text = entry_paths_for(data_root, _date(2026, 5, 6)).entry_md.read_text()
+    assert "updated body" in md_text
+    assert "🎉" in md_text
+    assert "raw/x.eml" in md_text  # raw sources preserved
+
+
+def test_preview_endpoint_renders_markdown_to_html(app) -> None:
+    fapp, _, _ = app
+    r = TestClient(fapp).post("/preview", data={"body": "# hi\n\n**there**"})
+    assert r.status_code == 200
+    assert "<h1>hi</h1>" in r.text
+    assert "<strong>there</strong>" in r.text
+```
+
+- [ ] **Step 2: Create `entry_edit.html.j2`**
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}Edit {{ entry.date }} — Driftnote{% endblock %}
+{% block content %}
+<form method="post" action="/entry/{{ entry.date }}" class="entry-edit">
+  <h1>Edit {{ entry.date }}</h1>
+  <label>Mood (one emoji): <input name="mood" value="{{ entry.mood or '' }}"></label>
+  <label>Tags (comma-separated): <input name="tags" value="{{ tags_csv }}" style="width:100%"></label>
+  <label>Body (markdown):</label>
+  <textarea name="body" rows="14"
+            hx-post="/preview" hx-target="#preview" hx-trigger="keyup changed delay:400ms"
+            style="width:100%">{{ entry.body_md }}</textarea>
+  <h3>Preview</h3>
+  <div id="preview" class="preview">{{ initial_preview|safe }}</div>
+  <p><button type="submit">Save</button> <a href="/entry/{{ entry.date }}">Cancel</a></p>
+</form>
+{% endblock %}
+```
+
+- [ ] **Step 3: Implement `src/driftnote/web/routes_edit.py`**
+
+```python
+"""Entry edit form, save handler, live-preview endpoint."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import date as _date
+from pathlib import Path
+
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from markdown_it import MarkdownIt
+from sqlalchemy import Engine
+
+from driftnote.db import session_scope
+from driftnote.filesystem.layout import entry_paths_for
+from driftnote.filesystem.locks import entry_lock
+from driftnote.filesystem.markdown_io import (
+    EntryDocument,
+    PhotoRef,
+    VideoRef,
+    read_entry,
+    write_entry,
+)
+from driftnote.repository.entries import (
+    EntryRecord,
+    get_entry,
+    replace_tags,
+    upsert_entry,
+)
+from driftnote.web.banners import compute_banners
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_md = MarkdownIt("commonmark")
+
+
+def install_edit_routes(
+    app: FastAPI,
+    *,
+    engine: Engine,
+    data_root: Path,
+    iso_now: Callable[[], str],
+) -> None:
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    @app.get("/entry/{date_str}/edit", response_class=HTMLResponse)
+    async def edit_form(request: Request, date_str: str):
+        with session_scope(engine) as session:
+            entry = get_entry(session, date_str)
+        if entry is None:
+            return HTMLResponse("Not found", status_code=404)
+        from driftnote.models import Tag
+        from sqlalchemy import select
+        with session_scope(engine) as session:
+            tags = [t.tag for t in session.scalars(select(Tag).where(Tag.date == date_str))]
+        ctx = {
+            "request": request,
+            "banners": compute_banners(engine, now=iso_now()),
+            "entry": entry,
+            "tags_csv": ", ".join(tags),
+            "initial_preview": _md.render(entry.body_md),
+        }
+        return templates.TemplateResponse("entry_edit.html.j2", ctx)
+
+    @app.post("/entry/{date_str}", response_class=HTMLResponse)
+    async def save_entry(
+        date_str: str,
+        mood: str = Form(""),
+        tags: str = Form(""),
+        body: str = Form(""),
+    ):
+        d = _date.fromisoformat(date_str)
+        paths = entry_paths_for(data_root, d)
+        if not paths.entry_md.exists():
+            return HTMLResponse("Not found", status_code=404)
+        new_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
+        with entry_lock(data_root, d):
+            existing = read_entry(paths.entry_md)
+            updated = EntryDocument(
+                date=existing.date,
+                mood=(mood.strip() or None),
+                tags=new_tags,
+                photos=existing.photos,
+                videos=existing.videos,
+                created_at=existing.created_at,
+                updated_at=iso_now(),
+                sources=existing.sources,
+                body=body if body.endswith("\n") else body + "\n",
+            )
+            write_entry(paths.entry_md, updated)
+            with session_scope(engine) as session:
+                upsert_entry(
+                    session,
+                    EntryRecord(
+                        date=date_str,
+                        mood=updated.mood,
+                        body_text=updated.body,
+                        body_md=updated.body,
+                        created_at=updated.created_at,
+                        updated_at=updated.updated_at,
+                    ),
+                )
+                replace_tags(session, date_str, new_tags)
+        return RedirectResponse(f"/entry/{date_str}", status_code=303)
+
+    @app.post("/preview", response_class=HTMLResponse)
+    async def preview(body: str = Form("")):
+        return HTMLResponse(_md.render(body))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_web_routes_edit.py -v`
+Expected: 3 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/web/templates/entry_edit.html.j2 src/driftnote/web/routes_edit.py tests/integration/test_web_routes_edit.py
+git commit -m "feat(web): entry edit form with HTMX live preview"
+```
+
+---
+
+### Task 9.5: `web/routes_media.py` + `web/routes_admin.py`
+
+**Files:**
+- Create: `src/driftnote/web/routes_media.py`
+- Create: `src/driftnote/web/routes_admin.py`
+- Create: `src/driftnote/web/templates/admin.html.j2`
+- Create: `tests/integration/test_web_routes_media_and_admin.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for media-serving and admin dashboard routes."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.repository.jobs import finish_job_run, record_job_run
+from driftnote.web.routes_admin import install_admin_routes
+from driftnote.web.routes_media import install_media_routes
+
+
+@pytest.fixture
+def setup(tmp_path: Path) -> tuple[FastAPI, Engine, Path]:
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    data_root = tmp_path / "data"
+    # Drop a tiny image into the entries tree.
+    entry_dir = data_root / "entries" / "2026" / "05" / "06"
+    (entry_dir / "originals").mkdir(parents=True)
+    (entry_dir / "web").mkdir()
+    (entry_dir / "thumbs").mkdir()
+    (entry_dir / "originals" / "photo.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (entry_dir / "web" / "photo.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    (entry_dir / "thumbs" / "photo.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+    app = FastAPI()
+    install_media_routes(app, data_root=data_root)
+    install_admin_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    return app, eng, data_root
+
+
+def test_media_serves_thumb(setup) -> None:
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/media/2026-05-06/thumb/photo.jpg")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/")
+    assert r.content[:2] == b"\xff\xd8"
+
+
+def test_media_404_for_missing_file(setup) -> None:
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/media/2026-05-06/web/missing.jpg")
+    assert r.status_code == 404
+
+
+def test_media_rejects_path_traversal(setup) -> None:
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/media/2026-05-06/thumb/..%2F..%2F..%2Fetc%2Fpasswd")
+    assert r.status_code in (400, 404)
+
+
+def test_admin_index_lists_each_job_card(setup) -> None:
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-05-06T08:00:01Z", status="ok", detail="ingested 1")
+    r = TestClient(fapp).get("/admin")
+    assert r.status_code == 200
+    assert "imap_poll" in r.text
+    assert "ingested 1" in r.text
+
+
+def test_admin_acknowledge(setup) -> None:
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-05-06T08:00:01Z", status="error", error_kind="imap_auth")
+    r = TestClient(fapp).post(f"/admin/runs/{rid}/ack")
+    assert r.status_code in (200, 303)
+    from driftnote.repository.jobs import recent_failures
+    with session_scope(eng) as session:
+        unack = recent_failures(session, now="2026-05-06T12:00:00Z", days=7, only_unacknowledged=True)
+    assert unack == []
+```
+
+- [ ] **Step 2: Implement `src/driftnote/web/routes_media.py`**
+
+```python
+"""Serve original / web / thumb media from the entries tree."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+
+
+def install_media_routes(app: FastAPI, *, data_root: Path) -> None:
+    @app.get("/media/{date_str}/{kind}/{filename}")
+    async def media(date_str: str, kind: str, filename: str):
+        if kind not in {"original", "web", "thumb"}:
+            raise HTTPException(status_code=400, detail="invalid kind")
+        # Defense against path traversal: filename and date_str are exact path components.
+        if "/" in filename or ".." in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="invalid filename")
+        try:
+            y, m, d = date_str.split("-")
+            int(y), int(m), int(d)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid date") from exc
+        sub = "originals" if kind == "original" else ("web" if kind == "web" else "thumbs")
+        path = data_root / "entries" / y / m / d / sub / filename
+        try:
+            resolved = path.resolve(strict=True)
+            data_root.resolve(strict=True)
+            if not str(resolved).startswith(str(data_root.resolve())):
+                raise HTTPException(status_code=400, detail="bad path")
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        return FileResponse(resolved)
+```
+
+- [ ] **Step 3: Create `admin.html.j2`**
+
+```html
+{% extends "base.html.j2" %}
+{% block title %}Admin — Driftnote{% endblock %}
+{% block content %}
+<h1>Admin</h1>
+<section class="job-cards">
+{% for card in cards %}
+  <article class="card">
+    <h2>{{ card.job }}</h2>
+    <p>Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}</p>
+    <p>Last success: {{ card.last_success_at or "(never)" }}</p>
+    <p>Failures (30d): {{ card.failures_30d }}</p>
+    <a href="/admin/runs/{{ card.job }}">history</a>
+  </article>
+{% endfor %}
+</section>
+
+{% if recent_runs is defined %}
+<h2>Runs for {{ job_filter }}</h2>
+<table class="runs">
+  <thead><tr><th>Started</th><th>Status</th><th>Detail</th><th>Error</th><th>Ack</th></tr></thead>
+  <tbody>
+  {% for r in recent_runs %}
+    <tr class="status-{{ r.status }}">
+      <td>{{ r.started_at }}</td>
+      <td>{{ r.status }}</td>
+      <td>{{ r.detail or "" }}</td>
+      <td>{{ (r.error_kind or "") }} {{ (r.error_message or "") }}</td>
+      <td>
+        {% if r.status in ('error', 'warn') and not r.acknowledged_at %}
+          <form method="post" action="/admin/runs/{{ r.id }}/ack" style="display:inline">
+            <button>ack</button>
+          </form>
+        {% else %}
+          {{ r.acknowledged_at or "" }}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
+```
+
+- [ ] **Step 4: Implement `src/driftnote/web/routes_admin.py`**
+
+```python
+"""Admin dashboard: per-job cards + drill-down + acknowledge."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import Engine, select
+
+from driftnote.db import session_scope
+from driftnote.models import JobRun
+from driftnote.repository.jobs import (
+    JobRunRecord,
+    acknowledge_run,
+    last_run,
+    last_successful_run,
+    recent_failures,
+)
+from driftnote.web.banners import compute_banners
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_JOBS = ["daily_prompt", "imap_poll", "digest_weekly", "digest_monthly", "digest_yearly", "backup", "disk_check"]
+
+
+@dataclass(frozen=True)
+class _JobCard:
+    job: str
+    last_started_at: str | None
+    last_status: str | None
+    last_success_at: str | None
+    failures_30d: int
+
+
+def install_admin_routes(app: FastAPI, *, engine: Engine, iso_now: Callable[[], str]) -> None:
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    def _build_cards(now: str) -> list[_JobCard]:
+        cards: list[_JobCard] = []
+        for job in _JOBS:
+            with session_scope(engine) as session:
+                last = last_run(session, job)
+                last_ok = last_successful_run(session, job)
+                fails = recent_failures(session, now=now, days=30)
+            failures_30d = sum(1 for f in fails if f.job == job)
+            cards.append(_JobCard(
+                job=job,
+                last_started_at=last.started_at if last else None,
+                last_status=last.status if last else None,
+                last_success_at=last_ok.started_at if last_ok else None,
+                failures_30d=failures_30d,
+            ))
+        return cards
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_index(request: Request):
+        now = iso_now()
+        return templates.TemplateResponse(
+            "admin.html.j2",
+            {"request": request, "banners": compute_banners(engine, now=now), "cards": _build_cards(now)},
+        )
+
+    @app.get("/admin/runs/{job}", response_class=HTMLResponse)
+    async def admin_drill(request: Request, job: str):
+        now = iso_now()
+        with session_scope(engine) as session:
+            stmt = select(JobRun).where(JobRun.job == job).order_by(JobRun.started_at.desc()).limit(100)
+            rows = [
+                JobRunRecord(
+                    id=r.id, job=r.job, started_at=r.started_at, finished_at=r.finished_at,
+                    status=r.status, detail=r.detail, error_kind=r.error_kind,
+                    error_message=r.error_message, acknowledged_at=r.acknowledged_at,
+                )
+                for r in session.scalars(stmt)
+            ]
+        return templates.TemplateResponse(
+            "admin.html.j2",
+            {
+                "request": request, "banners": compute_banners(engine, now=now),
+                "cards": _build_cards(now), "recent_runs": rows, "job_filter": job,
+            },
+        )
+
+    @app.post("/admin/runs/{run_id}/ack")
+    async def admin_ack(run_id: int):
+        with session_scope(engine) as session:
+            acknowledge_run(session, run_id=run_id, at=iso_now())
+        return RedirectResponse("/admin", status_code=303)
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_web_routes_media_and_admin.py -v`
+Expected: 5 passed.
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/web/routes_media.py src/driftnote/web/routes_admin.py src/driftnote/web/templates/admin.html.j2 tests/integration/test_web_routes_media_and_admin.py
+git commit -m "feat(web): media serving + admin dashboard with drill-down + ack"
+```
+
+---
+
+### Chunk 9 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–9 tests pass: `uv run pytest -v`.
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] 5 task commits in this chunk.
+
+**Hand-off:** Chunk 10 wires CLI + full app composition (lifespan, scheduler startup, all middleware/routes installed in `create_app`).
