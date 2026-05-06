@@ -9839,3 +9839,585 @@ git commit -m "feat(app): full create_app with lifespan, scheduler, and all rout
 - [ ] 2 task commits in this chunk.
 
 **Hand-off:** Chunk 11 packages the artifact (Containerfile push, GHCR build workflow, systemd quadlet/timer, backup script, README/docs).
+
+---
+
+## Chunk 11: Deployment + docs
+
+**Outcome of this chunk:** Production-deployable artifact: backup script + alert-email helper, systemd quadlet for the container, systemd backup timer, GHCR build workflow, complete README + Implementation.md + runbook. After this chunk Driftnote is ready to install on the RPi.
+
+### Task 11.1: `scripts/backup.sh` + `scripts/alert-email.py`
+
+**Files:**
+- Create: `scripts/backup.sh`
+- Create: `scripts/alert-email.py`
+
+- [ ] **Step 1: Create `scripts/backup.sh`**
+
+```bash
+#!/usr/bin/env bash
+# Monthly backup: tar.zst of data/entries + config.toml.
+# Writes a row into /var/driftnote/data/index.sqlite job_runs.
+# Optionally encrypts the archive via age if BACKUP_ENCRYPT=true.
+#
+# Invoked by /etc/systemd/system/driftnote-backup.service (oneshot timer).
+
+set -euo pipefail
+
+DATA_ROOT="${DATA_ROOT:-/var/driftnote}"
+BACKUP_DIR="$DATA_ROOT/backups"
+NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+MONTH_TAG="$(date -u +%Y-%m)"
+ARCHIVE="$BACKUP_DIR/driftnote-$MONTH_TAG.tar.zst"
+RETAIN_MONTHS="${RETAIN_MONTHS:-12}"
+ENCRYPT="${BACKUP_ENCRYPT:-false}"
+AGE_KEY_PATH="${AGE_KEY_PATH:-}"
+
+mkdir -p "$BACKUP_DIR"
+
+cd "$DATA_ROOT"
+tar --zstd -cf "$ARCHIVE" config.toml data/entries
+
+if [[ "$ENCRYPT" == "true" ]]; then
+    if [[ -z "$AGE_KEY_PATH" || ! -f "$AGE_KEY_PATH" ]]; then
+        echo "BACKUP_ENCRYPT=true but AGE_KEY_PATH unset/missing" >&2
+        exit 2
+    fi
+    age -R "$AGE_KEY_PATH" -o "$ARCHIVE.age" "$ARCHIVE"
+    rm -f "$ARCHIVE"
+    ARCHIVE="$ARCHIVE.age"
+fi
+
+# Prune older than retention.
+find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'driftnote-*.tar.zst' -o -name 'driftnote-*.tar.zst.age' \) \
+    -printf '%T@ %p\n' \
+  | sort -nr \
+  | tail -n +"$((RETAIN_MONTHS + 1))" \
+  | awk '{print $2}' \
+  | xargs -r rm -f
+
+# Record success row in SQLite.
+SIZE=$(stat -c%s "$ARCHIVE")
+DETAIL=$(printf '{"archive":"%s","size_bytes":%s}' "$(basename "$ARCHIVE")" "$SIZE")
+sqlite3 "$DATA_ROOT/data/index.sqlite" \
+    "INSERT INTO job_runs(job, started_at, finished_at, status, detail) \
+     VALUES('backup', '$NOW_ISO', '$NOW_ISO', 'ok', '$DETAIL');"
+
+echo "backup ok: $ARCHIVE ($SIZE bytes)"
+```
+
+Make it executable:
+
+```bash
+chmod +x scripts/backup.sh
+```
+
+- [ ] **Step 2: Create `scripts/alert-email.py`**
+
+```python
+#!/usr/bin/env python3
+"""Stand-alone alert-email helper.
+
+Invoked by /etc/systemd/system/driftnote-backup.service via OnFailure=. Reads
+SMTP credentials from the same env file the app uses. Subject + body come from
+$1 and $2.
+"""
+
+from __future__ import annotations
+
+import os
+import smtplib
+import sys
+from email.message import EmailMessage
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print("usage: alert-email.py <subject> <body>", file=sys.stderr)
+        return 2
+
+    subject, body = sys.argv[1], sys.argv[2]
+
+    user = os.environ["DRIFTNOTE_GMAIL_USER"]
+    password = os.environ["DRIFTNOTE_GMAIL_APP_PASSWORD"]
+    host = os.environ.get("DRIFTNOTE_SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("DRIFTNOTE_SMTP_PORT", "587"))
+    starttls = os.environ.get("DRIFTNOTE_SMTP_STARTTLS", "true").lower() == "true"
+
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = user
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    with smtplib.SMTP(host, port, timeout=10) as smtp:
+        if starttls:
+            smtp.starttls()
+        smtp.login(user, password)
+        smtp.send_message(msg)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 3: Smoke-test the backup script in dev**
+
+```bash
+mkdir -p /tmp/dn-backup-smoke/{data/entries,backups,config_src}
+cp config/config.example.toml /tmp/dn-backup-smoke/config.toml
+echo "demo" > /tmp/dn-backup-smoke/data/entries/dummy.md
+sqlite3 /tmp/dn-backup-smoke/data/index.sqlite \
+    "CREATE TABLE job_runs(id INTEGER PRIMARY KEY, job TEXT, started_at TEXT, finished_at TEXT, status TEXT, detail TEXT);"
+DATA_ROOT=/tmp/dn-backup-smoke RETAIN_MONTHS=3 ./scripts/backup.sh
+ls -lh /tmp/dn-backup-smoke/backups/
+sqlite3 /tmp/dn-backup-smoke/data/index.sqlite "SELECT status, detail FROM job_runs;"
+rm -rf /tmp/dn-backup-smoke
+```
+
+Expected: archive created, `status=ok` row inserted, output prints "backup ok: …".
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/backup.sh scripts/alert-email.py
+git commit -m "ops: backup script + alert-email helper"
+```
+
+---
+
+### Task 11.2: systemd quadlet + backup unit files
+
+**Files:**
+- Create: `deploy/driftnote.container`
+- Create: `deploy/driftnote-backup.service`
+- Create: `deploy/driftnote-backup.timer`
+- Create: `deploy/README.md`
+
+- [ ] **Step 1: `deploy/driftnote.container`**
+
+```ini
+# Install: copy to /etc/containers/systemd/driftnote.container, then
+#   systemctl daemon-reload && systemctl enable --now driftnote.container
+[Unit]
+Description=Driftnote app
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/maciej-makowski/driftnote:latest
+Volume=/var/driftnote:/var/driftnote:Z
+Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
+Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
+EnvironmentFile=/etc/driftnote/driftnote.env
+PublishPort=127.0.0.1:8000:8000
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- [ ] **Step 2: `deploy/driftnote-backup.service`**
+
+```ini
+# Install: copy to /etc/systemd/system/driftnote-backup.service.
+[Unit]
+Description=Driftnote monthly backup
+OnFailure=driftnote-backup-failure.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/driftnote/driftnote.env
+ExecStart=/usr/local/lib/driftnote/scripts/backup.sh
+User=driftnote
+Group=driftnote
+```
+
+- [ ] **Step 3: `deploy/driftnote-backup.timer`**
+
+```ini
+[Unit]
+Description=Driftnote monthly backup timer
+
+[Timer]
+OnCalendar=*-*-01 03:00:00
+Persistent=true
+Unit=driftnote-backup.service
+
+[Install]
+WantedBy=timers.target
+```
+
+Plus `deploy/driftnote-backup-failure.service` for the OnFailure hook:
+
+```ini
+[Unit]
+Description=Driftnote backup failure alert
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/driftnote/driftnote.env
+ExecStart=/usr/local/lib/driftnote/scripts/alert-email.py "Driftnote backup failed" "See journalctl -u driftnote-backup.service for details."
+```
+
+- [ ] **Step 4: `deploy/README.md`** (host-side install instructions)
+
+```markdown
+# Deploying Driftnote on the Raspberry Pi
+
+## 0. Prerequisites
+- Fedora-derived host with `podman` + systemd's container quadlet support.
+- A user `driftnote` (`useradd -r -m -s /sbin/nologin driftnote`).
+- `cloudflared` already configured to route a hostname → `127.0.0.1:8000`.
+- A directory `/var/driftnote/` owned by user `driftnote`.
+
+## 1. Install scripts and units
+```bash
+sudo install -d /usr/local/lib/driftnote/scripts
+sudo install -m 0755 scripts/backup.sh scripts/alert-email.py /usr/local/lib/driftnote/scripts/
+
+sudo install -m 0644 deploy/driftnote.container /etc/containers/systemd/
+sudo install -m 0644 deploy/driftnote-backup.service /etc/systemd/system/
+sudo install -m 0644 deploy/driftnote-backup-failure.service /etc/systemd/system/
+sudo install -m 0644 deploy/driftnote-backup.timer /etc/systemd/system/
+```
+
+## 2. Drop in config + secrets
+```bash
+sudo install -d -m 0700 -o root /etc/driftnote
+sudo install -m 0600 -o root config/config.example.toml /var/driftnote/config.toml
+sudo $EDITOR /etc/driftnote/driftnote.env   # see template below
+```
+
+Template for `/etc/driftnote/driftnote.env`:
+```
+DRIFTNOTE_GMAIL_USER=you@gmail.com
+DRIFTNOTE_GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+DRIFTNOTE_CF_ACCESS_AUD=<application-AUD-tag>
+DRIFTNOTE_CF_TEAM_DOMAIN=<your-team>.cloudflareaccess.com
+DRIFTNOTE_WEB_BASE_URL=https://driftnote.<your-domain>
+DRIFTNOTE_ENVIRONMENT=prod
+```
+
+## 3. Enable
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now driftnote.container
+sudo systemctl enable --now driftnote-backup.timer
+```
+
+## 4. Verify
+```bash
+curl -s http://127.0.0.1:8000/healthz  # {"status":"ok",...}
+sudo journalctl -u driftnote.container -f
+```
+
+## 5. Update
+```bash
+sudo podman pull ghcr.io/maciej-makowski/driftnote:latest
+sudo systemctl restart driftnote.container
+```
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deploy/
+git commit -m "ops: systemd quadlet + backup timer + deploy README"
+```
+
+---
+
+### Task 11.3: GHCR build workflow
+
+**Files:**
+- Create: `.github/workflows/build-image.yml`
+
+- [ ] **Step 1: Create the workflow**
+
+```yaml
+name: Build & Push Container Image
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          platforms: linux/arm64,linux/amd64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/driftnote:latest
+            ghcr.io/${{ github.repository_owner }}/driftnote:${{ github.sha }}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add .github/workflows/build-image.yml
+git commit -m "ci: build + push driftnote image to GHCR on master"
+```
+
+---
+
+### Task 11.4: Final docs (README, Implementation.md, runbook)
+
+**Files:**
+- Replace: `README.md`
+- Create: `Implementation.md`
+- Create: `docs/runbook.md`
+
+- [ ] **Step 1: Replace `README.md`**
+
+```markdown
+# Driftnote
+
+Personal email-driven journaling app. Daily prompt → reply with mood emoji + markdown body + optional photos/videos → calendar/tag/search-browsable web UI behind Cloudflare Access. Weekly/monthly/yearly digest emails.
+
+## Architecture (one-paragraph)
+
+A single Python 3.14 process: FastAPI + Jinja2 + HTMX for the web UI, APScheduler for daily prompt + IMAP poll + digest jobs in-process, SQLite (WAL + FTS5) as a derived index over a markdown-on-disk source of truth. Cloudflare Access fronts the web UI via a Cloudflare Tunnel. See [docs/superpowers/specs/2026-05-06-driftnote-design.md](docs/superpowers/specs/2026-05-06-driftnote-design.md) for the design spec.
+
+## Quickstart (development)
+
+```bash
+uv sync
+uv run pre-commit install
+podman-compose --podman-path ./scripts/podman-remote.sh -f podman-compose.dev.yml up -d
+uv run uvicorn --factory driftnote.app:create_app --reload
+```
+
+Open http://localhost:8000/ — empty calendar; smoke-test by sending an email through the GreenMail container.
+
+## CLI
+
+```bash
+driftnote serve                 # start the web app
+driftnote reindex               # rebuild SQLite from filesystem
+driftnote reindex --from-raw    # also re-derive entry.md from raw/*.eml
+driftnote restore-imap --since=2026-05-01
+driftnote send-prompt           # manually send today's prompt
+```
+
+## Setting up Gmail (one-time)
+
+1. Enable 2-Step Verification on your Google account.
+2. Google Account → Security → App passwords → "Mail / Other (Driftnote)" → save the 16-character credential.
+3. Settings → Filters and Blocked Addresses → "Create filter" with `subject:"[Driftnote]"` `from:me`. Apply label "Driftnote/Inbox", "Skip Inbox". Make sure the labels `Driftnote/Inbox` and `Driftnote/Processed` exist.
+
+## Setting up Cloudflare Access
+
+1. Cloudflare Zero Trust → Access → Applications → Add application → Self-hosted.
+2. Domain: `driftnote.<your-domain>`. Save and copy the **Application Audience (AUD) Tag**.
+3. Add a policy "Owner" with rule `email is <you>`.
+
+## Production deployment
+
+See [deploy/README.md](deploy/README.md). TL;DR:
+
+```bash
+sudo install -d /usr/local/lib/driftnote/scripts
+sudo install -m 0755 scripts/* /usr/local/lib/driftnote/scripts/
+sudo install -m 0644 deploy/* /etc/systemd/system/  # quadlet + timer + service
+sudo install -m 0644 deploy/driftnote.container /etc/containers/systemd/
+sudo install -m 0600 -o root /dev/stdin /etc/driftnote/driftnote.env <<<'...secrets...'
+sudo install -m 0644 config/config.example.toml /var/driftnote/config.toml
+sudo systemctl daemon-reload
+sudo systemctl enable --now driftnote.container driftnote-backup.timer
+```
+
+## Backup and restore
+
+A monthly tarball lands in `/var/driftnote/backups/`; copy newer ones to OneDrive (or any cold storage) at your convenience. Local retention defaults to 12 months.
+
+To restore on a fresh host:
+
+```bash
+zstd -d -c /path/to/driftnote-2026-04.tar.zst | tar -x -C /var/driftnote/
+sudo systemctl start driftnote.container
+sudo podman exec systemd-driftnote driftnote reindex   # rebuild SQLite from disk
+```
+
+If recent days are missing from your latest backup, fetch them from Gmail directly:
+
+```bash
+sudo podman exec systemd-driftnote driftnote restore-imap --since=2026-05-01
+```
+
+## Testing
+
+```bash
+uv run pytest -m "not live"             # full suite minus tests requiring real Gmail
+uv run pytest -v                         # everything (live tests opt-in)
+```
+
+Integration tests use **GreenMail** (in-memory SMTP+IMAP) via `testcontainers-python`. No real network or Gmail required for CI.
+
+## Implementation notes
+
+See [Implementation.md](Implementation.md) for design decisions, data model, and module boundaries. See [docs/runbook.md](docs/runbook.md) for operational procedures.
+
+## License
+
+MIT.
+```
+
+- [ ] **Step 2: Create `Implementation.md`**
+
+```markdown
+# Driftnote Implementation Notes
+
+This document captures the *why* behind structural decisions. Most of the *what* lives in the spec ([`docs/superpowers/specs/2026-05-06-driftnote-design.md`](docs/superpowers/specs/2026-05-06-driftnote-design.md)) and the implementation plan ([`docs/superpowers/plans/2026-05-06-driftnote-implementation.md`](docs/superpowers/plans/2026-05-06-driftnote-implementation.md)).
+
+## Module boundaries
+
+- **`config`** loads TOML + env. Secrets are validated from env only and never sourced from TOML.
+- **`logging`** is structlog → JSON; secret keys are redacted before any renderer sees them.
+- **`models`** — SQLAlchemy ORM. The `Entry` table uses an explicit `id INTEGER PRIMARY KEY` so that FTS5 can use `content_rowid='id'`. Foreign keys reference `entries.date` (the natural key).
+- **`db`** — engine factory + WAL/busy-timeout pragmas + FTS5 triggers. `session_scope` commits on success, rolls back on error.
+- **`filesystem`** — single source of truth for path layout, atomic markdown_io, per-date `fcntl.flock`. Uses `newline=""` everywhere so bodies round-trip byte-for-byte.
+- **`repository`** — typed CRUD over SQLAlchemy. ORM types do not leak above this layer; every public function returns a Pydantic record.
+- **`mail`** — pluggable transport. Same code path against Gmail (App Password) and GreenMail (in-process tests).
+- **`ingest`** — `parse.py` extracts mood/tags/body/attachments from a raw `.eml`; `attachments.py` derives photo web/thumb (Pillow + pillow-heif) and video poster (ffmpeg shell-out); `pipeline.py` orchestrates with per-date locks, idempotency on `Message-ID`, and whole-message rollback on pre-IMAP-move failure.
+- **`scheduler`** — APScheduler runner with a `job_run` context manager that records every invocation in the `job_runs` table. Concrete jobs: `prompt_job`, `poll_job` (handles `imap_moved=0` retries), `digest_jobs`, `disk_job`.
+- **`alerts`** — self-emailing wrapper with 24h dedup keyed on `error_kind`.
+- **`web`** — auth middleware (Cloudflare Access JWT), browse/edit/media/admin routes, banners, Jinja2 + HTMX templates.
+
+## Spec deviations / refinements
+
+- **`entries.id`** — added to enable FTS5 `content_rowid`. Spec §2 prose treated `date` as the PK; this is a refinement, not a change to natural keys.
+- **`ingested_messages.imap_moved`** — added so a poll-step-g failure can be retried by the next poll without re-running ingestion (spec §3.B IMAP retry path).
+- **Locks at `data/locks/<date>.lock`** instead of locking the entry directory directly. Equivalent semantics; doesn't require the entry directory to exist for a first-time ingestion.
+
+## Test pyramid
+
+- **Unit** — pure functions, fixtures, no I/O beyond tmp dirs (≥40 tests).
+- **Integration** — uses GreenMail container fixture for IMAP+SMTP, FastAPI `TestClient` for routes, real SQLite (in tmp). No real Gmail.
+- **Live** — opt-in via `pytest -m live`; requires real Gmail credentials. Used when working on auth/IMAP edge cases.
+
+## Configuration model
+
+- Cron expressions, regexes, file size limits, digest enable flags live in `config.toml` (mounted into the container).
+- Secrets (`DRIFTNOTE_GMAIL_USER`, etc.) come from env only.
+- `DRIFTNOTE_IMAP_*` and `DRIFTNOTE_SMTP_*` env vars override the matching `[email]` config keys, used by `podman-compose.dev.yml` to point at GreenMail.
+
+## Operational notes
+
+- All datetimes stored as ISO 8601 UTC strings (`...Z`).
+- WAL + 5s busy-timeout makes concurrent writes from the host-side backup script and the in-container app safe.
+- The backup script runs OUTSIDE the container (host-side systemd timer); it writes a `job_runs` row directly to the same SQLite file.
+- Digest cron expressions are evaluated in the configured timezone (`Europe/London` by default), which means DST transitions don't shift digest send times.
+```
+
+- [ ] **Step 3: Create `docs/runbook.md`**
+
+```markdown
+# Driftnote Runbook
+
+## Daily
+
+- App self-health: `curl -s http://localhost:8000/healthz | jq` (proxy through Cloudflare-Access if remote).
+- New entry doesn't appear: check IMAP poll job in admin (`/admin/runs/imap_poll`). If failures: `journalctl -u driftnote.container | tail -100` and look for `event="ingest_one"`.
+
+## After deployment
+
+1. Send a test email to yourself with the daily prompt subject. Check it lands in `Driftnote/Inbox` per your filter.
+2. Reply with `Mood: 💪\n\nshort entry. #smoke` and a small photo.
+3. Watch the next 5-minute poll cycle (or `driftnote send-prompt --date=YYYY-MM-DD` then a quick reply).
+4. Browse `https://driftnote.<your-domain>/` and click into the entry.
+
+## Restore from backup
+
+```bash
+# 1. Pick the archive (latest).
+ls -lh /var/driftnote/backups/
+
+# 2. Stop the app to avoid SQLite contention.
+sudo systemctl stop driftnote.container
+
+# 3. Restore.
+zstd -d -c /var/driftnote/backups/driftnote-YYYY-MM.tar.zst | sudo tar -x -C /var/driftnote/
+
+# 4. Restart and reindex.
+sudo systemctl start driftnote.container
+sudo podman exec systemd-driftnote driftnote reindex
+
+# 5. Recent days missing? Pull from IMAP.
+sudo podman exec systemd-driftnote driftnote restore-imap --since=YYYY-MM-DD
+```
+
+## Common diagnostics
+
+| Symptom | First check |
+|---|---|
+| `/healthz` returns `db: error` | SQLite file permission, disk full, WAL contention |
+| Daily prompt never arrives | `journalctl -u driftnote.container | grep daily_prompt` — look for SMTP errors |
+| Reply email never appears | Check IMAP filter is set correctly (label = `Driftnote/Inbox`, `Skip Inbox`). Then admin → imap_poll. |
+| Disk banner stuck | `/admin` → disk_check history. Confirm `disk_state` row matches reality; if you've cleaned up, `sqlite3 .../index.sqlite "DELETE FROM disk_state"` |
+| Backup script alert | `systemctl status driftnote-backup.service` and `journalctl -u driftnote-backup.service` |
+| Cloudflare Access 403s | Confirm AUD tag and team domain in env file match the dashboard. JWKS rotates ~yearly. |
+```
+
+- [ ] **Step 4: Verify all tests still pass and lint is clean**
+
+```bash
+uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy
+uv run pytest -m "not live" -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add README.md Implementation.md docs/runbook.md
+git commit -m "docs: README, Implementation.md, runbook"
+```
+
+---
+
+### Chunk 11 closeout
+
+**Acceptance criteria:**
+- [ ] All Chunks 1–11 tests pass: `uv run pytest -m "not live" -v`.
+- [ ] Lint, format, type checks all clean.
+- [ ] `scripts/backup.sh` smoke test in Task 11.1 Step 3 succeeds.
+- [ ] Container builds locally: `podman build -f Containerfile -t driftnote:smoke .`.
+- [ ] 4 task commits in this chunk.
+
+**Hand-off:** Driftnote is feature-complete. The first real prod deploy follows `deploy/README.md`. Subsequent improvements (CSS polish, tests, Gmail OAuth migration if App Passwords are deprecated, etc.) belong in follow-up tickets, not in this initial implementation plan.
+
+---
+
+## Plan summary
+
+11 chunks, one logical project. Each chunk is reviewable independently, ends with a green test suite + clean lint, and produces a meaningful deliverable.
+
+**Execution recommendation:** Use `superpowers:subagent-driven-development` so each task gets a fresh subagent with focused context. After Chunk 2 lands, Chunks 3, 4, 5 can run in parallel worktrees. After Chunk 6 lands, Chunks 7, 8, 9 can run in parallel. The remaining chunks have linear dependencies.
+
+**Out of scope:** Polish CSS (the templates ship a minimal but functional layout — refinement belongs in follow-ups), real-Gmail live tests in CI (kept opt-in via `@pytest.mark.live`), inline-CID rendering tweaks if real Gmail proves picky (one-line follow-up to wrap multipart/related), Gmail OAuth migration (a localized swap inside `mail/transport.py` if Google removes App Password support).
