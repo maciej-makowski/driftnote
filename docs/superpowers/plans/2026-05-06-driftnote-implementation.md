@@ -9193,3 +9193,649 @@ git commit -m "feat(web): media serving + admin dashboard with drill-down + ack"
 - [ ] 5 task commits in this chunk.
 
 **Hand-off:** Chunk 10 wires CLI + full app composition (lifespan, scheduler startup, all middleware/routes installed in `create_app`).
+
+---
+
+## Chunk 10: CLI + full app composition
+
+**Outcome of this chunk:** A Typer CLI with `serve`, `reindex`, `restore-imap`, `send-prompt` subcommands. The `create_app` factory now loads config, opens the DB, installs all middleware + routes, and starts the scheduler in a FastAPI lifespan.
+
+### Task 10.1: `cli.py` — Typer commands
+
+**Files:**
+- Replace: `src/driftnote/cli.py` (was a placeholder; this version is the real one)
+- Create: `tests/integration/test_cli.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for the CLI commands."""
+
+from __future__ import annotations
+
+from datetime import date as _date
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine
+from typer.testing import CliRunner
+
+from driftnote.cli import app as cli_app
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.filesystem.layout import entry_paths_for
+from driftnote.filesystem.markdown_io import EntryDocument, write_entry
+from driftnote.repository.entries import EntryRecord, get_entry, upsert_entry
+
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+def _seed_filesystem_only(data_root: Path, *, day: str = "2026-05-06", body: str = "from disk\n") -> None:
+    paths = entry_paths_for(data_root, _date.fromisoformat(day))
+    paths.dir.mkdir(parents=True, exist_ok=True)
+    write_entry(
+        paths.entry_md,
+        EntryDocument(
+            date=_date.fromisoformat(day), mood="💪", tags=["work"],
+            created_at="2026-05-06T21:00:00Z", updated_at="2026-05-06T21:00:00Z",
+            sources=["raw/x.eml"], body=body,
+        ),
+    )
+
+
+def test_reindex_rebuilds_sqlite_from_filesystem(tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_root = tmp_path / "data"
+    db_path = data_root / "index.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    eng = make_engine(db_path)
+    init_db(eng)
+    _seed_filesystem_only(data_root)
+
+    monkeypatch.setenv("DRIFTNOTE_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("DRIFTNOTE_DB_PATH", str(db_path))
+
+    result = runner.invoke(cli_app, ["reindex"])
+    assert result.exit_code == 0, result.output
+
+    eng2 = make_engine(db_path)
+    with session_scope(eng2) as session:
+        entry = get_entry(session, "2026-05-06")
+    assert entry is not None
+    assert entry.body_md == "from disk\n"
+    assert entry.mood == "💪"
+
+
+def test_reindex_warns_on_uiedited_entries_without_force(tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_root = tmp_path / "data"
+    db_path = data_root / "index.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    make_engine(db_path)  # creates dir
+    init_db(make_engine(db_path))
+    paths = entry_paths_for(data_root, _date(2026, 5, 6))
+    paths.dir.mkdir(parents=True, exist_ok=True)
+    write_entry(
+        paths.entry_md,
+        EntryDocument(
+            date=_date(2026, 5, 6), mood="💪", tags=[], created_at="2026-05-06T21:00:00Z",
+            updated_at="2026-05-07T08:00:00Z",  # updated > created => UI edit
+            sources=["raw/x.eml"], body="hand-edited\n",
+        ),
+    )
+
+    monkeypatch.setenv("DRIFTNOTE_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("DRIFTNOTE_DB_PATH", str(db_path))
+
+    result = runner.invoke(cli_app, ["reindex", "--from-raw"])
+    assert result.exit_code != 0
+    assert "force" in result.output.lower()
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_cli.py -v`
+
+- [ ] **Step 3: Replace `src/driftnote/cli.py`**
+
+```python
+"""Typer CLI entrypoints: serve, reindex, restore-imap, send-prompt."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import date as _date
+from datetime import datetime, timezone
+from pathlib import Path
+
+import typer
+from sqlalchemy import Engine
+
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.filesystem.layout import entry_paths_for
+from driftnote.filesystem.markdown_io import read_entry
+from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
+from driftnote.repository.media import MediaInput, replace_media
+
+app = typer.Typer(no_args_is_help=True, add_completion=False, help="Driftnote CLI")
+
+
+def _data_root() -> Path:
+    return Path(os.environ.get("DRIFTNOTE_DATA_ROOT", "/var/driftnote/data"))
+
+
+def _db_path() -> Path:
+    explicit = os.environ.get("DRIFTNOTE_DB_PATH")
+    if explicit:
+        return Path(explicit)
+    return _data_root() / "index.sqlite"
+
+
+def _walk_entries(data_root: Path):
+    base = data_root / "entries"
+    if not base.exists():
+        return
+    for year_dir in sorted(base.iterdir()):
+        if not year_dir.is_dir():
+            continue
+        for month_dir in sorted(year_dir.iterdir()):
+            for day_dir in sorted(month_dir.iterdir()):
+                if (day_dir / "entry.md").exists():
+                    yield day_dir / "entry.md"
+
+
+@app.command()
+def serve(host: str = "0.0.0.0", port: int = 8000) -> None:
+    """Start the FastAPI app via uvicorn."""
+    import uvicorn
+    from driftnote.app import create_app
+    uvicorn.run(create_app, factory=True, host=host, port=port)
+
+
+@app.command()
+def reindex(
+    from_raw: bool = typer.Option(False, "--from-raw", help="Re-derive entry.md from raw/*.eml"),
+    force: bool = typer.Option(False, "--force", help="Override the UI-edits guard"),
+) -> None:
+    """Rebuild SQLite index from filesystem entries (and optionally re-parse raw .eml)."""
+    data_root = _data_root()
+    db_path = _db_path()
+    engine = make_engine(db_path)
+    init_db(engine)
+
+    if from_raw and not force:
+        for entry_md in _walk_entries(data_root):
+            doc = read_entry(entry_md)
+            if doc.updated_at > doc.created_at:
+                typer.echo(
+                    f"refusing to overwrite UI-edited entry {entry_md} "
+                    "(updated_at > created_at). Pass --force to override.",
+                    err=True,
+                )
+                raise typer.Exit(2)
+
+    if from_raw:
+        # Iterate every entry, parse all raw/*.eml in order, rewrite entry.md.
+        from driftnote.config import load_config
+        config_path = Path(os.environ["DRIFTNOTE_CONFIG"])
+        config = load_config(config_path)
+        from driftnote.ingest.pipeline import ingest_one
+        for entry_md in _walk_entries(data_root):
+            day_dir = entry_md.parent
+            (day_dir / "entry.md").unlink(missing_ok=True)
+            for eml in sorted((day_dir / "raw").glob("*.eml")):
+                received_at = _parse_received_from_filename(eml.name)
+                ingest_one(
+                    raw=eml.read_bytes(), config=config, engine=engine,
+                    data_root=data_root, received_at=received_at,
+                )
+
+    # Rebuild SQLite from current entry.md state.
+    for entry_md in _walk_entries(data_root):
+        doc = read_entry(entry_md)
+        with session_scope(engine) as session:
+            upsert_entry(
+                session,
+                EntryRecord(
+                    date=doc.date.isoformat(),
+                    mood=doc.mood,
+                    body_text=doc.body,
+                    body_md=doc.body,
+                    created_at=doc.created_at,
+                    updated_at=doc.updated_at,
+                ),
+            )
+            replace_tags(session, doc.date.isoformat(), list(doc.tags))
+            replace_media(
+                session, doc.date.isoformat(),
+                [MediaInput(kind="photo", filename=p.filename, caption=p.caption) for p in doc.photos]
+                + [MediaInput(kind="video", filename=v.filename, caption=v.caption) for v in doc.videos],
+            )
+
+    typer.echo("reindex complete")
+
+
+@app.command(name="restore-imap")
+def restore_imap(
+    since: str = typer.Option(..., "--since", help="YYYY-MM-DD"),
+    until: str | None = typer.Option(None, "--until", help="YYYY-MM-DD (inclusive)"),
+) -> None:
+    """Re-fetch matching emails from IMAP and run them through ingestion."""
+    asyncio.run(_run_restore(since, until))
+
+
+@app.command(name="send-prompt")
+def send_prompt(date: str | None = typer.Option(None, "--date", help="YYYY-MM-DD; default today")) -> None:
+    """Manually send today's (or another day's) prompt."""
+    asyncio.run(_run_send_prompt(date))
+
+
+async def _run_restore(since: str, until: str | None) -> None:
+    from driftnote.config import load_config
+    config = load_config(Path(os.environ["DRIFTNOTE_CONFIG"]))
+    engine = make_engine(_db_path())
+    init_db(engine)
+
+    from driftnote.mail.imap import _connect, _extract_rfc822  # type: ignore[attr-defined]
+    from driftnote.mail.transport import transports_from_config
+    imap_t, _ = transports_from_config(config)
+
+    client = await _connect(imap_t)
+    try:
+        for folder in (imap_t.inbox_folder, imap_t.processed_folder):
+            await client.select(folder)
+            criteria = f'SINCE {_imap_date(since)}'
+            if until:
+                criteria += f' BEFORE {_imap_date(_inclusive_until(until))}'
+            result, data = await client.search(criteria)
+            if result != "OK" or not data or not data[0]:
+                continue
+            for ident in data[0].split():
+                ident_str = ident.decode("ascii")
+                fetch_result, fetch_data = await client.fetch(ident_str, "(RFC822)")
+                raw = _extract_rfc822(fetch_data)
+                if raw is None:
+                    continue
+                from driftnote.ingest.pipeline import ingest_one
+                ingest_one(
+                    raw=raw, config=config, engine=engine,
+                    data_root=_data_root(), received_at=datetime.now(tz=timezone.utc),
+                )
+    finally:
+        try:
+            await client.logout()
+        except Exception:
+            pass
+
+    typer.echo("restore-imap complete")
+
+
+async def _run_send_prompt(date_str: str | None) -> None:
+    from driftnote.config import load_config
+    from driftnote.mail.transport import transports_from_config
+    from driftnote.scheduler.prompt_job import run_prompt_job
+
+    config = load_config(Path(os.environ["DRIFTNOTE_CONFIG"]))
+    engine = make_engine(_db_path())
+    init_db(engine)
+    _, smtp = transports_from_config(config)
+
+    today = _date.fromisoformat(date_str) if date_str else _date.today()
+
+    body_template_path = Path("src/driftnote/web/templates") / config.prompt.body_template.split("/")[-1]
+    body = body_template_path.read_text() if body_template_path.exists() else "How was {date}?"
+
+    await run_prompt_job(
+        engine=engine, smtp=smtp, recipient=config.email.recipient,
+        subject_template=config.prompt.subject_template,
+        body_template_text=body, today=today,
+    )
+    typer.echo("prompt sent")
+
+
+def _imap_date(iso: str) -> str:
+    """Convert YYYY-MM-DD to IMAP DD-Mon-YYYY."""
+    d = _date.fromisoformat(iso)
+    return d.strftime("%d-%b-%Y")
+
+
+def _inclusive_until(iso: str) -> str:
+    from datetime import timedelta
+    d = _date.fromisoformat(iso)
+    return (d + timedelta(days=1)).isoformat()
+
+
+def _parse_received_from_filename(name: str) -> datetime:
+    from driftnote.filesystem.layout import parse_eml_received_at
+    return parse_eml_received_at(name)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_cli.py -v`
+Expected: 2 passed.
+
+- [ ] **Step 5: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run mypy
+git add src/driftnote/cli.py tests/integration/test_cli.py
+git commit -m "feat(cli): typer commands serve/reindex/restore-imap/send-prompt"
+```
+
+---
+
+### Task 10.2: Full `create_app` with lifespan + scheduler
+
+**Files:**
+- Replace: `src/driftnote/app.py`
+- Create: `src/driftnote/web/templates/emails/prompt.txt.j2`
+- Create: `tests/integration/test_app_full.py`
+
+- [ ] **Step 1: Write failing test**
+
+```python
+"""Tests for the fully-composed FastAPI app."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine
+
+
+def _write_minimal_config(path: Path) -> None:
+    path.write_text(
+        '[schedule]\n'
+        'daily_prompt   = "0 21 * * *"\n'
+        'weekly_digest  = "0 8 * * 1"\n'
+        'monthly_digest = "0 8 1 * *"\n'
+        'yearly_digest  = "0 8 1 1 *"\n'
+        'imap_poll      = "*/5 * * * *"\n'
+        'timezone       = "Europe/London"\n'
+        '[email]\n'
+        'imap_folder            = "INBOX"\n'
+        'imap_processed_folder  = "INBOX.Processed"\n'
+        'recipient              = "you@example.com"\n'
+        'sender_name            = "Driftnote"\n'
+        'imap_host              = "x"\n'
+        'imap_port              = 993\n'
+        'imap_tls               = true\n'
+        'smtp_host              = "x"\n'
+        'smtp_port              = 587\n'
+        'smtp_tls               = false\n'
+        'smtp_starttls          = true\n'
+        '[prompt]\n'
+        'subject_template = "[Driftnote] How was {date}?"\n'
+        'body_template    = "templates/emails/prompt.txt.j2"\n'
+        '[parsing]\n'
+        'mood_regex = \'^\\\\s*Mood:\\\\s*(\\\\S+)\'\n'
+        'tag_regex  = \'#(\\\\w+)\'\n'
+        'max_photos = 4\n'
+        'max_videos = 2\n'
+        '[digests]\n'
+        'weekly_enabled  = true\n'
+        'monthly_enabled = true\n'
+        'yearly_enabled  = true\n'
+        '[backup]\n'
+        'retain_months = 12\n'
+        'encrypt       = false\n'
+        'age_key_path  = ""\n'
+        '[disk]\n'
+        'warn_percent  = 80\n'
+        'alert_percent = 95\n'
+        'check_cron    = "0 */6 * * *"\n'
+        'data_path     = "/tmp"\n'
+    )
+
+
+def test_full_app_boots_and_serves_calendar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = tmp_path / "config.toml"
+    _write_minimal_config(cfg_path)
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    monkeypatch.setenv("DRIFTNOTE_CONFIG", str(cfg_path))
+    monkeypatch.setenv("DRIFTNOTE_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("DRIFTNOTE_GMAIL_USER", "u@example.com")
+    monkeypatch.setenv("DRIFTNOTE_GMAIL_APP_PASSWORD", "p")
+    monkeypatch.setenv("DRIFTNOTE_CF_ACCESS_AUD", "aud")
+    monkeypatch.setenv("DRIFTNOTE_CF_TEAM_DOMAIN", "team.example.com")
+    monkeypatch.setenv("DRIFTNOTE_ENVIRONMENT", "dev")
+
+    from driftnote.app import create_app
+    app = create_app(skip_startup_jobs=True)
+    client = TestClient(app)
+
+    healthz = client.get("/healthz")
+    assert healthz.status_code == 200
+    calendar = client.get("/")
+    assert calendar.status_code == 200
+```
+
+- [ ] **Step 2: Create the prompt email template**
+
+`src/driftnote/web/templates/emails/prompt.txt.j2`:
+
+```
+Hi,
+
+How was {date}? Reply to this email with:
+
+  Mood: <one emoji>
+
+  Then a short paragraph or two (markdown supported).
+
+  #hashtags anywhere in the body to tag it.
+
+Up to 4 photos and 2 videos as attachments.
+
+Just hit reply.
+
+— Driftnote
+```
+
+- [ ] **Step 3: Replace `src/driftnote/app.py`**
+
+```python
+"""Full FastAPI app factory: config, DB, middleware, routes, scheduler."""
+
+from __future__ import annotations
+
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI
+
+from driftnote.alerts import AlertSender
+from driftnote.config import Config, load_config
+from driftnote.db import init_db, make_engine, session_scope
+from driftnote.logging import configure_logging
+from driftnote.mail.smtp import send_email
+from driftnote.mail.transport import transports_from_config
+from driftnote.scheduler.disk_job import run_disk_check
+from driftnote.scheduler.poll_job import run_poll_job
+from driftnote.scheduler.prompt_job import run_prompt_job
+from driftnote.scheduler.runner import build_scheduler, cron, job_run
+from driftnote.scheduler.digest_jobs import (
+    run_monthly_digest,
+    run_weekly_digest,
+    run_yearly_digest,
+)
+from driftnote.web.auth import CloudflareAccessAuth, install_cf_access_middleware
+from driftnote.web.routes_admin import install_admin_routes
+from driftnote.web.routes_browse import install_browse_routes, install_static
+from driftnote.web.routes_edit import install_edit_routes
+from driftnote.web.routes_health import install_health_routes
+from driftnote.web.routes_media import install_media_routes
+
+
+def _iso_now() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class _SmtpAlertSender(AlertSender):
+    def __init__(self, config: Config) -> None:
+        _, self._smtp = transports_from_config(config)
+        self._recipient = config.email.recipient
+
+    async def send(self, *, kind: str, subject: str, body: str) -> None:
+        await send_email(self._smtp, recipient=self._recipient, subject=subject, body_text=body)
+
+
+def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
+    """Compose the full app. `skip_startup_jobs=True` is for tests."""
+    configure_logging(level="INFO", json_output=os.environ.get("DRIFTNOTE_ENVIRONMENT", "prod") != "dev")
+
+    config_path = Path(os.environ["DRIFTNOTE_CONFIG"])
+    config = load_config(config_path)
+    data_root = Path(os.environ.get("DRIFTNOTE_DATA_ROOT", "/var/driftnote/data"))
+    db_path = data_root / "index.sqlite"
+
+    engine = make_engine(db_path)
+    init_db(engine)
+
+    web_base_url = os.environ.get("DRIFTNOTE_WEB_BASE_URL", "https://driftnote.example.com")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if skip_startup_jobs:
+            yield
+            return
+        scheduler = build_scheduler(timezone=config.schedule.timezone)
+        imap_t, smtp_t = transports_from_config(config)
+        sender = _SmtpAlertSender(config)
+        prompt_body = (Path(__file__).parent / "web" / config.prompt.body_template).read_text()
+
+        async def _prompt_tick() -> None:
+            with job_run(engine, "daily_prompt"):
+                from datetime import date as _date
+                await run_prompt_job(
+                    engine=engine, smtp=smtp_t, recipient=config.email.recipient,
+                    subject_template=config.prompt.subject_template,
+                    body_template_text=prompt_body, today=_date.today(),
+                )
+
+        async def _poll_tick() -> None:
+            with job_run(engine, "imap_poll"):
+                await run_poll_job(config=config, engine=engine, data_root=data_root, imap=imap_t)
+
+        async def _disk_tick() -> None:
+            await run_disk_check(
+                engine=engine, sender=sender, data_path=config.disk.data_path,
+                warn_percent=config.disk.warn_percent, alert_percent=config.disk.alert_percent,
+                now=_iso_now(),
+            )
+
+        scheduler.add_job(_prompt_tick, cron(config.schedule.daily_prompt, config.schedule.timezone))
+        scheduler.add_job(_poll_tick, cron(config.schedule.imap_poll, config.schedule.timezone))
+        scheduler.add_job(_disk_tick, cron(config.disk.check_cron, config.schedule.timezone))
+
+        if config.digests.weekly_enabled:
+            async def _weekly_tick() -> None:
+                from datetime import date as _date
+                from datetime import timedelta
+                with job_run(engine, "digest_weekly"):
+                    today = _date.today()
+                    week_start = today - timedelta(days=7 + today.weekday())
+                    await run_weekly_digest(
+                        engine=engine, smtp=smtp_t, recipient=config.email.recipient,
+                        week_start=week_start, web_base_url=web_base_url,
+                    )
+            scheduler.add_job(_weekly_tick, cron(config.schedule.weekly_digest, config.schedule.timezone))
+
+        if config.digests.monthly_enabled:
+            async def _monthly_tick() -> None:
+                from datetime import date as _date
+                with job_run(engine, "digest_monthly"):
+                    today = _date.today()
+                    prev_month_year = today.year if today.month > 1 else today.year - 1
+                    prev_month = today.month - 1 if today.month > 1 else 12
+                    await run_monthly_digest(
+                        engine=engine, smtp=smtp_t, recipient=config.email.recipient,
+                        year=prev_month_year, month=prev_month, web_base_url=web_base_url,
+                    )
+            scheduler.add_job(_monthly_tick, cron(config.schedule.monthly_digest, config.schedule.timezone))
+
+        if config.digests.yearly_enabled:
+            async def _yearly_tick() -> None:
+                from datetime import date as _date
+                with job_run(engine, "digest_yearly"):
+                    today = _date.today()
+                    await run_yearly_digest(
+                        engine=engine, smtp=smtp_t, recipient=config.email.recipient,
+                        year=today.year - 1, web_base_url=web_base_url,
+                    )
+            scheduler.add_job(_yearly_tick, cron(config.schedule.yearly_digest, config.schedule.timezone))
+
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.shutdown(wait=False)
+
+    app = FastAPI(title="Driftnote", version="0.1.0", lifespan=lifespan)
+
+    auth = CloudflareAccessAuth(
+        audience=config.secrets.cf_access_aud,
+        team_domain=config.secrets.cf_team_domain,
+        environment=config.environment,
+    )
+    install_cf_access_middleware(app, auth)
+
+    def _db_ok() -> bool:
+        try:
+            with session_scope(engine):
+                return True
+        except Exception:
+            return False
+
+    def _last_imap_poll_status() -> tuple[str | None, str | None]:
+        from driftnote.repository.jobs import last_run
+        with session_scope(engine) as session:
+            row = last_run(session, "imap_poll")
+        return (row.started_at, row.status) if row else (None, None)
+
+    install_health_routes(app, db_ok=_db_ok, last_imap_poll_status=_last_imap_poll_status)
+    install_browse_routes(app, engine=engine, iso_now=_iso_now)
+    install_edit_routes(app, engine=engine, data_root=data_root, iso_now=_iso_now)
+    install_media_routes(app, data_root=data_root)
+    install_admin_routes(app, engine=engine, iso_now=_iso_now)
+    install_static(app)
+
+    return app
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/integration/test_app_full.py -v`
+Expected: 1 passed.
+
+- [ ] **Step 5: Run the FULL test suite — everything from all chunks**
+
+Run: `uv run pytest -m "not live" -v`
+Expected: all tests pass (full suite from Chunks 1–10).
+
+- [ ] **Step 6: Lint + commit**
+
+```bash
+uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy
+git add src/driftnote/app.py src/driftnote/web/templates/emails/prompt.txt.j2 tests/integration/test_app_full.py
+git commit -m "feat(app): full create_app with lifespan, scheduler, and all routes"
+```
+
+---
+
+### Chunk 10 closeout
+
+**Acceptance criteria:**
+- [ ] Full test suite passes: `uv run pytest -v -m "not live"`.
+- [ ] `uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy` is clean.
+- [ ] `driftnote --help` lists the four subcommands.
+- [ ] 2 task commits in this chunk.
+
+**Hand-off:** Chunk 11 packages the artifact (Containerfile push, GHCR build workflow, systemd quadlet/timer, backup script, README/docs).
