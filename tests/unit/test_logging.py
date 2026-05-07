@@ -48,6 +48,11 @@ def test_redact_secrets_helper_keeps_non_secret_keys() -> None:
     assert out == {"gmail_user": "u", "gmail_app_password": REDACTED, "extra": 1}
 
 
+def test_redact_secrets_helper_redacts_secret_key() -> None:
+    out = redact_secrets({"secret": "x"})
+    assert out == {"secret": REDACTED}
+
+
 def test_pretty_output_when_json_disabled(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(level="DEBUG", json_output=False)
     log = structlog.get_logger("test")
