@@ -95,10 +95,10 @@ def install_browse_routes(
             media = list_media(session, date_str) if entry else []
         if entry is None:
             return HTMLResponse("Not found", status_code=404)
-        # Render markdown → HTML
+        # Render markdown → HTML (html=False prevents raw-HTML passthrough, mitigating XSS)
         from markdown_it import MarkdownIt
 
-        md = MarkdownIt("commonmark")
+        md = MarkdownIt("commonmark", {"html": False})
         body_html = md.render(entry.body_md)
         # Tags via Tag table:
         from sqlalchemy import select

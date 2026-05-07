@@ -29,7 +29,7 @@ from driftnote.repository.entries import (
 from driftnote.web.banners import compute_banners
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
-_md = MarkdownIt("commonmark")
+_md = MarkdownIt("commonmark", {"html": False})
 
 
 def install_edit_routes(

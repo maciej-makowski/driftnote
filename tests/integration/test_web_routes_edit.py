@@ -89,3 +89,12 @@ def test_preview_endpoint_renders_markdown_to_html(app: tuple[FastAPI, Engine, P
     assert r.status_code == 200
     assert "<h1>hi</h1>" in r.text
     assert "<strong>there</strong>" in r.text
+
+
+def test_preview_escapes_script_tags(app: tuple[FastAPI, Engine, Path]) -> None:
+    """Regression: raw HTML in preview body must NOT pass through to the browser (XSS hardening)."""
+    fapp, _, _ = app
+    r = TestClient(fapp).post("/preview", data={"body": "<script>alert(1)</script>hello"})
+    assert r.status_code == 200
+    assert "<script>" not in r.text
+    assert "&lt;script&gt;" in r.text

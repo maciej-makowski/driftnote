@@ -65,3 +65,27 @@ def test_search_returns_fts_hits(app_with_data: tuple[FastAPI, Engine]) -> None:
     r = TestClient(app).get("/search?q=risotto")
     assert r.status_code == 200
     assert "2026-05-06" in r.text
+
+
+def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:
+    """Regression: raw HTML in body_md must NOT pass through to the browser (XSS hardening)."""
+    eng = make_engine(tmp_path / "xss.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-06-01",
+                mood=None,
+                body_text="This is a body.",
+                body_md="<script>alert(1)</script>This is a body.",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-06-01T12:00:00Z")
+    r = TestClient(app).get("/entry/2026-06-01")
+    assert r.status_code == 200
+    assert "<script>" not in r.text
+    assert "&lt;script&gt;" in r.text
