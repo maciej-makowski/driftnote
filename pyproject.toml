@@ -66,6 +66,7 @@ select = [
     "RUF",
     "PTH",
     "SIM",
+    "S",
 ]
 ignore = [
     "E501",
@@ -91,6 +92,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "live: requires real Gmail credentials; not run in CI",
     "slow: deselect with '-m \"not slow\"'",
