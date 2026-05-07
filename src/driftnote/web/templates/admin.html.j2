@@ -1,0 +1,42 @@
+{% extends "base.html.j2" %}
+{% block title %}Admin — Driftnote{% endblock %}
+{% block content %}
+<h1>Admin</h1>
+<section class="job-cards">
+{% for card in cards %}
+  <article class="card">
+    <h2>{{ card.job }}</h2>
+    <p>Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}{% if card.last_detail %} ({{ card.last_detail }}){% endif %}</p>
+    <p>Last success: {{ card.last_success_at or "(never)" }}</p>
+    <p>Failures (30d): {{ card.failures_30d }}</p>
+    <a href="/admin/runs/{{ card.job }}">history</a>
+  </article>
+{% endfor %}
+</section>
+
+{% if recent_runs is defined %}
+<h2>Runs for {{ job_filter }}</h2>
+<table class="runs">
+  <thead><tr><th>Started</th><th>Status</th><th>Detail</th><th>Error</th><th>Ack</th></tr></thead>
+  <tbody>
+  {% for r in recent_runs %}
+    <tr class="status-{{ r.status }}">
+      <td>{{ r.started_at }}</td>
+      <td>{{ r.status }}</td>
+      <td>{{ r.detail or "" }}</td>
+      <td>{{ (r.error_kind or "") }} {{ (r.error_message or "") }}</td>
+      <td>
+        {% if r.status in ('error', 'warn') and not r.acknowledged_at %}
+          <form method="post" action="/admin/runs/{{ r.id }}/ack" style="display:inline">
+            <button>ack</button>
+          </form>
+        {% else %}
+          {{ r.acknowledged_at or "" }}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
