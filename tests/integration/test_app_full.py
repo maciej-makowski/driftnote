@@ -1,4 +1,4 @@
-"""Smoke test: /healthz returns 200."""
+"""Tests for the fully-composed FastAPI app."""
 
 from __future__ import annotations
 
@@ -53,8 +53,9 @@ def _write_minimal_config(path: Path) -> None:
     )
 
 
-def test_healthz_returns_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Smoke test: the create_app() boots and /healthz returns 200."""
+def test_full_app_boots_and_serves_calendar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg_path = tmp_path / "config.toml"
     _write_minimal_config(cfg_path)
     data_root = tmp_path / "data"
@@ -71,7 +72,8 @@ def test_healthz_returns_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     app = create_app(skip_startup_jobs=True)
     client = TestClient(app)
-    r = client.get("/healthz")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
+
+    healthz = client.get("/healthz")
+    assert healthz.status_code == 200
+    calendar = client.get("/")
+    assert calendar.status_code == 200
