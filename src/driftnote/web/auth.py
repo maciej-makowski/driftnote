@@ -50,7 +50,7 @@ class CloudflareAccessAuth:
                 resp = httpx.get(self.jwks_url, timeout=5.0)
                 resp.raise_for_status()
                 payload = resp.json()
-            except httpx.HTTPError, ValueError:
+            except (httpx.HTTPError, ValueError):  # fmt: skip
                 return None
             cache: dict[str, Any] = {}
             for jwk in payload.get("keys", []):
