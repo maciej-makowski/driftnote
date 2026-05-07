@@ -1,0 +1,23 @@
+:root { --bg:#fafafa; --fg:#222; --muted:#888; --warn:#f5c542; --error:#e74c3c; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
+       margin: 0; padding: 0 16px; max-width: 960px; margin-inline: auto; }
+.topbar { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #eee; }
+.topbar nav a { margin-left: 12px; color: var(--fg); text-decoration: none; }
+.brand { font-weight: 700; text-decoration: none; color: var(--fg); }
+.banners { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.banner { padding: 8px 12px; border-radius: 6px; }
+.banner-warn  { background: #fff8e0; border-left: 4px solid var(--warn); }
+.banner-error { background: #fdecea; border-left: 4px solid var(--error); }
+.calendar { width: 100%; border-collapse: collapse; }
+.calendar th, .calendar td { padding: 4px; text-align: center; border: 1px solid #eee; height: 56px; }
+.calendar td.dim { color: #ccc; }
+.calendar .emoji { font-size: 20px; }
+.calendar .dom { font-size: 11px; color: var(--muted); }
+.tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-cloud a { color: var(--fg); text-decoration: none; }
+.entry .mood { font-size: 26px; }
+.entry .tags a { color: var(--muted); margin-right: 6px; text-decoration: none; }
+.entry .media img { max-width: 240px; border-radius: 8px; margin: 4px; }
+.entry .media video { max-width: 100%; border-radius: 8px; }
+.search-results li { margin: 6px 0; }

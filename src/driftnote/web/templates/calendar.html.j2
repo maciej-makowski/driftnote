@@ -1,0 +1,30 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ year }}-{{ "%02d"|format(month) }} — Driftnote{% endblock %}
+{% block content %}
+<h1>{{ month_name }} {{ year }}</h1>
+<nav class="month-nav">
+  <a href="/?year={{ prev_year }}&month={{ prev_month }}">‹ prev</a>
+  <a href="/?year={{ next_year }}&month={{ next_month }}">next ›</a>
+</nav>
+<table class="calendar">
+  <thead><tr>
+    {% for label in ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] %}<th>{{ label }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+    {% for row in cells %}
+      <tr>
+      {% for c in row %}
+        <td class="{% if not c.in_month %}dim{% endif %}">
+          {% if c.in_month %}
+            <a href="/entry/{{ c.date.isoformat() }}">
+              <div class="dom">{{ c.day_of_month }}</div>
+              <div class="emoji">{{ c.emoji or "·" }}</div>
+            </a>
+          {% endif %}
+        </td>
+      {% endfor %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

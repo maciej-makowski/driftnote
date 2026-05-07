@@ -1,0 +1,14 @@
+{% extends "base.html.j2" %}
+{% block title %}Search — Driftnote{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form method="get" action="/search">
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" autofocus>
+  <button>Search</button>
+</form>
+<ul class="search-results">
+  {% for e in results %}
+    <li><a href="/entry/{{ e.date }}">{{ e.date }} {{ e.mood or "" }}</a> — {{ e.body_text|truncate(160) }}</li>
+  {% endfor %}
+</ul>
+{% endblock %}
