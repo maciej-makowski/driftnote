@@ -8,7 +8,15 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -80,6 +88,12 @@ class DiskConfig(BaseModel):
     alert_percent: int = Field(ge=1, le=100)
     check_cron: CronExpr
     data_path: str
+
+    @model_validator(mode="after")
+    def _check_threshold_order(self) -> DiskConfig:
+        if self.warn_percent >= self.alert_percent:
+            raise ValueError("warn_percent must be < alert_percent")
+        return self
 
 
 class Secrets(BaseSettings):

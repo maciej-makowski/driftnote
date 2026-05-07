@@ -30,7 +30,11 @@ _SECRET_KEYS = frozenset(
 
 
 def redact_secrets(event_dict: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of event_dict with values for known secret keys masked."""
+    """Return a copy of event_dict with values for known *top-level* secret keys masked.
+
+    Note: redaction is shallow — nested dict values are not inspected. Callers
+    that pass nested config dicts should mask sensitive fields before logging.
+    """
     return {k: (REDACTED if k.lower() in _SECRET_KEYS else v) for k, v in event_dict.items()}
 
 

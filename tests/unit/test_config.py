@@ -6,8 +6,9 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from pydantic import ValidationError
 
-from driftnote.config import Config, ConfigError, load_config
+from driftnote.config import Config, ConfigError, DiskConfig, load_config
 
 _FULL_CONFIG_TOML = """
 [schedule]
@@ -136,3 +137,13 @@ def test_load_config_raises_on_malformed_toml(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setenv("DRIFTNOTE_CF_TEAM_DOMAIN", "team.example.com")
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+def test_disk_config_rejects_inverted_thresholds() -> None:
+    with pytest.raises(ValidationError):
+        DiskConfig(
+            warn_percent=95,
+            alert_percent=80,
+            check_cron="0 */6 * * *",
+            data_path="/var/driftnote/data",
+        )
