@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from driftnote.models import Base
 
+_SESSION_FACTORIES: dict[int, sessionmaker[Session]] = {}
+
 _FTS_DDL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
     body_text,
@@ -49,7 +51,6 @@ def make_engine(db_path: Path) -> Engine:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         f"sqlite:///{db_path}",
-        future=True,
         connect_args={"timeout": 5.0},  # busy-timeout in seconds
     )
 
@@ -62,6 +63,7 @@ def make_engine(db_path: Path) -> Engine:
         cur.execute("PRAGMA busy_timeout=5000")
         cur.close()
 
+    _SESSION_FACTORIES[id(engine)] = sessionmaker(engine, expire_on_commit=False)
     return engine
 
 
@@ -77,7 +79,7 @@ def init_db(engine: Engine) -> None:
 @contextmanager
 def session_scope(engine: Engine) -> Iterator[Session]:
     """Context manager that yields a Session, commits on success, rolls back on error."""
-    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    factory: sessionmaker[Session] = _SESSION_FACTORIES[id(engine)]
     session = factory()
     try:
         yield session
