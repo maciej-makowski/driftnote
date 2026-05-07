@@ -16,9 +16,11 @@ from driftnote.repository.entries import (
     list_entries_by_month,
     list_entries_by_tag,
     list_entries_in_range,
+    list_tags_for_date,
     replace_tags,
     search_fts,
     tag_frequencies_in_range,
+    tags_by_date_in_range,
     upsert_entry,
 )
 
@@ -136,3 +138,40 @@ def test_list_entries_in_range_inclusive(engine: Engine) -> None:
     with session_scope(engine) as session:
         rs = list_entries_in_range(session, "2026-05-02", "2026-05-03")
     assert [e.date for e in rs] == ["2026-05-02", "2026-05-03"]
+
+
+def test_list_tags_for_date_returns_sorted(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record())
+        replace_tags(session, "2026-05-06", ["work", "cooking", "art"])
+    with session_scope(engine) as session:
+        tags = list_tags_for_date(session, "2026-05-06")
+    assert tags == ["art", "cooking", "work"]
+
+
+def test_list_tags_for_date_empty_for_unknown_date(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        tags = list_tags_for_date(session, "1900-01-01")
+    assert tags == []
+
+
+def test_tags_by_date_in_range_groups_correctly(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-01"))
+        replace_tags(session, "2026-05-01", ["work", "cooking"])
+        upsert_entry(session, _record(date="2026-05-03"))
+        replace_tags(session, "2026-05-03", ["rest"])
+        upsert_entry(session, _record(date="2026-04-30"))
+        replace_tags(session, "2026-04-30", ["outside_range"])
+    with session_scope(engine) as session:
+        result = tags_by_date_in_range(session, "2026-05-01", "2026-05-03")
+    assert result == {"2026-05-01": ["cooking", "work"], "2026-05-03": ["rest"]}
+
+
+def test_tags_by_date_in_range_excludes_out_of_range(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-04-30"))
+        replace_tags(session, "2026-04-30", ["old"])
+    with session_scope(engine) as session:
+        result = tags_by_date_in_range(session, "2026-05-01", "2026-05-31")
+    assert result == {}

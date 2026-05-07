@@ -19,6 +19,7 @@ from driftnote.repository.entries import (
     get_entry,
     list_entries_by_month,
     list_entries_by_tag,
+    list_tags_for_date,
     search_fts,
     tag_frequencies_in_range,
 )
@@ -100,17 +101,12 @@ def install_browse_routes(
 
         md = MarkdownIt("commonmark", {"html": False})
         body_html = md.render(entry.body_md)
-        # Tags via Tag table:
-        from sqlalchemy import select
-
-        from driftnote.models import Tag
-
         with session_scope(engine) as session:
-            tag_rows = session.scalars(select(Tag).where(Tag.date == date_str)).all()
+            tags = list_tags_for_date(session, date_str)
         return templates.TemplateResponse(
             request,
             "entry.html.j2",
-            _ctx(entry=entry, body_html=body_html, media=media, tags=[t.tag for t in tag_rows]),
+            _ctx(entry=entry, body_html=body_html, media=media, tags=tags),
         )
 
     @app.get("/tags", response_class=HTMLResponse)

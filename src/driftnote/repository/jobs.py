@@ -137,6 +137,12 @@ def recent_alerts_of_kind(
     return [_to_record(r) for r in session.scalars(stmt)]
 
 
+def recent_runs_for_job(session: Session, job: str, *, limit: int = 100) -> list[JobRunRecord]:
+    """Most-recent-first runs for a single job, capped at `limit`."""
+    stmt = select(JobRun).where(JobRun.job == job).order_by(JobRun.started_at.desc()).limit(limit)
+    return [_to_record(r) for r in session.scalars(stmt)]
+
+
 def _shift_iso(iso: str, *, days_delta: int = 0, hours_delta: int = 0) -> str:
     """Return iso shifted by the given delta. Centralized so callers don't reimplement parsing."""
     from datetime import datetime, timedelta

@@ -9,16 +9,15 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine
 
 from driftnote.db import session_scope
-from driftnote.models import JobRun
 from driftnote.repository.jobs import (
-    JobRunRecord,
     acknowledge_run,
     last_run,
     last_successful_run,
     recent_failures,
+    recent_runs_for_job,
 )
 from driftnote.web.banners import compute_banners
 
@@ -80,26 +79,7 @@ def install_admin_routes(app: FastAPI, *, engine: Engine, iso_now: Callable[[], 
     async def admin_drill(request: Request, job: str) -> HTMLResponse:
         now = iso_now()
         with session_scope(engine) as session:
-            stmt = (
-                select(JobRun)
-                .where(JobRun.job == job)
-                .order_by(JobRun.started_at.desc())
-                .limit(100)
-            )
-            rows = [
-                JobRunRecord(
-                    id=r.id,
-                    job=r.job,
-                    started_at=r.started_at,
-                    finished_at=r.finished_at,
-                    status=r.status,
-                    detail=r.detail,
-                    error_kind=r.error_kind,
-                    error_message=r.error_message,
-                    acknowledged_at=r.acknowledged_at,
-                )
-                for r in session.scalars(stmt)
-            ]
+            rows = recent_runs_for_job(session, job, limit=100)
         return templates.TemplateResponse(
             request,
             "admin.html.j2",

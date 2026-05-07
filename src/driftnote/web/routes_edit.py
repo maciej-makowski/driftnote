@@ -23,6 +23,7 @@ from driftnote.filesystem.markdown_io import (
 from driftnote.repository.entries import (
     EntryRecord,
     get_entry,
+    list_tags_for_date,
     replace_tags,
     upsert_entry,
 )
@@ -47,12 +48,8 @@ def install_edit_routes(
             entry = get_entry(session, date_str)
         if entry is None:
             return HTMLResponse("Not found", status_code=404)
-        from sqlalchemy import select
-
-        from driftnote.models import Tag
-
         with session_scope(engine) as session:
-            tags = [t.tag for t in session.scalars(select(Tag).where(Tag.date == date_str))]
+            tags = list_tags_for_date(session, date_str)
         ctx = {
             "banners": compute_banners(engine, now=iso_now()),
             "entry": entry,

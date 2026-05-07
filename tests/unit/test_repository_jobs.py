@@ -16,6 +16,7 @@ from driftnote.repository.jobs import (
     last_successful_run,
     recent_alerts_of_kind,
     recent_failures,
+    recent_runs_for_job,
     record_job_run,
 )
 
@@ -123,3 +124,36 @@ def test_record_returns_running_record(engine: Engine) -> None:
     assert latest.id == run_id
     assert latest.status == "running"
     assert isinstance(latest, JobRunRecord)
+
+
+def test_recent_runs_for_job_returns_most_recent_first(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        a = record_job_run(session, job="backup", started_at="2026-05-01T00:00:00Z")
+        finish_job_run(session, run_id=a, finished_at="2026-05-01T00:00:01Z", status="ok")
+        b = record_job_run(session, job="backup", started_at="2026-05-03T00:00:00Z")
+        finish_job_run(session, run_id=b, finished_at="2026-05-03T00:00:01Z", status="error")
+        # Different job — should not appear.
+        c = record_job_run(session, job="imap_poll", started_at="2026-05-04T00:00:00Z")
+        finish_job_run(session, run_id=c, finished_at="2026-05-04T00:00:01Z", status="ok")
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "backup")
+    assert [r.id for r in rows] == [b, a]
+    assert all(r.job == "backup" for r in rows)
+
+
+def test_recent_runs_for_job_respects_limit(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        ids = []
+        for i in range(5):
+            rid = record_job_run(
+                session, job="disk_check", started_at=f"2026-05-0{i + 1}T00:00:00Z"
+            )
+            finish_job_run(
+                session, run_id=rid, finished_at=f"2026-05-0{i + 1}T00:00:01Z", status="ok"
+            )
+            ids.append(rid)
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "disk_check", limit=3)
+    assert len(rows) == 3
+    # Most recent first.
+    assert rows[0].id == ids[-1]

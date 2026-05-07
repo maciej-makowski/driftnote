@@ -133,3 +133,18 @@ def search_fts(session: Session, query: str) -> list[EntryRecord]:
 
 def delete_entry(session: Session, date: str) -> None:
     session.execute(delete(Entry).where(Entry.date == date))
+
+
+def list_tags_for_date(session: Session, date: str) -> list[str]:
+    """Return tag names (lowercase) for the given date in stable order."""
+    stmt = select(Tag.tag).where(Tag.date == date).order_by(Tag.tag)
+    return list(session.scalars(stmt))
+
+
+def tags_by_date_in_range(session: Session, start: str, end: str) -> dict[str, list[str]]:
+    """Return tag lists keyed by date, for dates with at least one tag in [start, end] (inclusive)."""
+    stmt = select(Tag).where(Tag.date.between(start, end)).order_by(Tag.date, Tag.tag)
+    out: dict[str, list[str]] = {}
+    for t in session.scalars(stmt):
+        out.setdefault(t.date, []).append(t.tag)
+    return out

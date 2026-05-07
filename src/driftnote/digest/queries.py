@@ -5,12 +5,11 @@ from __future__ import annotations
 from datetime import date as _date
 from html import escape
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine
 
 from driftnote.db import session_scope
 from driftnote.digest.inputs import DayInput
-from driftnote.models import Tag
-from driftnote.repository.entries import list_entries_in_range
+from driftnote.repository.entries import list_entries_in_range, tags_by_date_in_range
 from driftnote.repository.media import list_media
 
 
@@ -40,12 +39,7 @@ def days_in_range(engine: Engine, *, start: _date, end: _date) -> list[DayInput]
 
     # Backfill tags via a single query.
     with session_scope(engine) as session:
-        tag_rows = session.scalars(
-            select(Tag).where(Tag.date.between(start.isoformat(), end.isoformat()))
-        ).all()
-    tags_by_date: dict[str, list[str]] = {}
-    for t in tag_rows:
-        tags_by_date.setdefault(t.date, []).append(t.tag)
+        tags_by_date = tags_by_date_in_range(session, start.isoformat(), end.isoformat())
 
     return [
         DayInput(
