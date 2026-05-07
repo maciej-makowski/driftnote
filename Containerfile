@@ -30,7 +30,6 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /build/.venv /app/.venv
-COPY src /app/src
 COPY config /app/config
 
 RUN useradd --system --create-home --uid 1000 driftnote \
