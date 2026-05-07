@@ -11,11 +11,13 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Engine
+from sqlalchemy.exc import OperationalError
 
 from driftnote.db import session_scope
 from driftnote.digest.inputs import DayInput
 from driftnote.digest.moodboard import monthly_moodboard_grid
 from driftnote.repository.entries import (
+    EntryRecord,
     get_entry,
     list_entries_by_month,
     list_entries_by_tag,
@@ -118,11 +120,19 @@ def install_browse_routes(
 
     @app.get("/search", response_class=HTMLResponse)
     async def search_view(request: Request, q: str | None = Query(None)) -> HTMLResponse:
-        results = []
+        results: list[EntryRecord] = []
+        error: str | None = None
         if q:
-            with session_scope(engine) as session:
-                results = search_fts(session, q)
-        return templates.TemplateResponse(request, "search.html.j2", _ctx(q=q, results=results))
+            try:
+                with session_scope(engine) as session:
+                    results = search_fts(session, q)
+            except OperationalError as exc:
+                orig = getattr(exc, "orig", None)
+                msg = orig.args[0] if orig and orig.args else str(exc)
+                error = f"invalid search query: {msg}"
+        return templates.TemplateResponse(
+            request, "search.html.j2", _ctx(q=q, results=results, error=error)
+        )
 
 
 def install_static(app: FastAPI) -> None:

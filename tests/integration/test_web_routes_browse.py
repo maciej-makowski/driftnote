@@ -67,6 +67,13 @@ def test_search_returns_fts_hits(app_with_data: tuple[FastAPI, Engine]) -> None:
     assert "2026-05-06" in r.text
 
 
+def test_search_invalid_fts_returns_200_with_error(app_with_data: tuple[FastAPI, Engine]) -> None:
+    app, _ = app_with_data
+    r = TestClient(app).get("/search?q=foo+OR+%28bar")  # unmatched paren
+    assert r.status_code == 200
+    assert "invalid" in r.text.lower()
+
+
 def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:
     """Regression: raw HTML in body_md must NOT pass through to the browser (XSS hardening)."""
     eng = make_engine(tmp_path / "xss.sqlite")

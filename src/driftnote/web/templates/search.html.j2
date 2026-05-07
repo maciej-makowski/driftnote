@@ -6,6 +6,9 @@
   <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" autofocus>
   <button>Search</button>
 </form>
+{% if error %}
+  <p class="banner-warn" style="padding:8px;border-radius:4px">{{ error }}</p>
+{% endif %}
 <ul class="search-results">
   {% for e in results %}
     <li><a href="/entry/{{ e.date }}">{{ e.date }} {{ e.mood or "" }}</a> — {{ e.body_text|truncate(160) }}</li>
