@@ -11,7 +11,7 @@ from sqlalchemy import Engine
 
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.mail.transport import SmtpTransport
-from driftnote.repository.ingested import find_prompt_by_message_id
+from driftnote.repository.ingested import PendingPromptRecord, find_prompt_by_message_id
 from driftnote.scheduler.prompt_job import run_prompt_job
 from tests.conftest import MailServer
 
@@ -62,6 +62,6 @@ def test_run_prompt_job_sends_and_anchors(mail_server: MailServer, engine: Engin
     assert found.date == "2026-05-06"
 
 
-def _find_prompt_by_message_id(engine: Engine, mid: str):  # type: ignore[return]
+def _find_prompt_by_message_id(engine: Engine, mid: str) -> PendingPromptRecord | None:
     with session_scope(engine) as session:
         return find_prompt_by_message_id(session, mid)

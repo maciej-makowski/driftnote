@@ -12,6 +12,17 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Engine
 
+from driftnote.config import (
+    BackupConfig,
+    Config,
+    DigestsConfig,
+    DiskConfig,
+    EmailConfig,
+    ParsingConfig,
+    PromptConfig,
+    ScheduleConfig,
+    Secrets,
+)
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.mail.transport import ImapTransport
 from driftnote.repository.entries import get_entry
@@ -51,11 +62,11 @@ def _drop_reply(mail_server: MailServer, *, in_reply_to: str | None, body: str) 
     mb.login(mail_server.user, mail_server.password)
     mb.append("INBOX", "", imaplib.Time2Internaldate(0), msg.as_bytes())
     mb.logout()
-    return msg["Message-ID"]
+    return str(msg["Message-ID"])
 
 
 @pytest.fixture(autouse=True)
-def _clean_mailbox(mail_server: MailServer):  # type: ignore[return]
+def _clean_mailbox(mail_server: MailServer) -> None:
     mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
     mb.login(mail_server.user, mail_server.password)
     for folder in ("INBOX", "INBOX.Processed"):
@@ -75,20 +86,8 @@ def engine_data(tmp_path: Path) -> tuple[Engine, Path]:
     return eng, tmp_path / "data"
 
 
-def _make_config(mail_server: MailServer, data_root: Path):  # type: ignore[return]
+def _make_config(mail_server: MailServer, data_root: Path) -> Config:
     from pydantic import SecretStr
-
-    from driftnote.config import (
-        BackupConfig,
-        Config,
-        DigestsConfig,
-        DiskConfig,
-        EmailConfig,
-        ParsingConfig,
-        PromptConfig,
-        ScheduleConfig,
-        Secrets,
-    )
 
     return Config(
         schedule=ScheduleConfig(
@@ -204,7 +203,7 @@ def test_poll_retries_imap_move_on_imap_moved_zero(
     async def _fail_move(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("simulated IMAP move failure")
 
-    real_move = _poll._move_to_processed
+    real_move = _poll._move_to_processed  # type: ignore[attr-defined]
     monkeypatch.setattr(_poll, "_move_to_processed", _fail_move)
 
     cfg = _make_config(mail_server, data_root)
