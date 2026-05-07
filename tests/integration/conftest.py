@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import select
 import socket
 import time
 from collections.abc import Iterator
@@ -19,29 +20,62 @@ from testcontainers.core.container import DockerContainer
 from tests.conftest import MailServer
 
 
-def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> None:
+def _wait_for_smtp_banner(host: str, port: int, timeout: float = 30.0) -> None:
+    """Wait until the SMTP server sends a banner (not just accepts TCP connections)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection((host, port), timeout=1):
-                return
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((host, port))
+            ready, _, _ = select.select([s], [], [], 2.0)
+            if ready:
+                data = s.recv(256)
+                if data and data.startswith(b"220"):
+                    s.close()
+                    return
+            s.close()
         except OSError:
-            time.sleep(0.5)
-    raise TimeoutError(f"port {host}:{port} not reachable within {timeout}s")
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(f"SMTP banner not received from {host}:{port} within {timeout}s")
+
+
+def _wait_for_imap_banner(host: str, port: int, timeout: float = 30.0) -> None:
+    """Wait until the IMAP server sends a greeting (not just accepts TCP connections)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((host, port))
+            ready, _, _ = select.select([s], [], [], 2.0)
+            if ready:
+                data = s.recv(256)
+                if data and b"IMAP" in data:
+                    s.close()
+                    return
+            s.close()
+        except OSError:
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(f"IMAP greeting not received from {host}:{port} within {timeout}s")
 
 
 @pytest.fixture(scope="session")
 def mail_server() -> Iterator[MailServer]:
     user = "you"
     password = "apppwd"
-    address = "you@example.com"
+    domain = "example.com"
+    address = f"{user}@{domain}"
+    # GreenMail 2.1.4 users format: login:password@domain
     container = (
         DockerContainer("greenmail/standalone:2.1.4")
         .with_env(
             "GREENMAIL_OPTS",
             (
                 "-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap "
-                f"-Dgreenmail.users={user}:{password}:{address} "
+                f"-Dgreenmail.users={user}:{password}@{domain} "
                 "-Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled"
             ),
         )
@@ -52,8 +86,8 @@ def mail_server() -> Iterator[MailServer]:
         host = container.get_container_host_ip()
         smtp_port = int(container.get_exposed_port(3025))
         imap_port = int(container.get_exposed_port(3143))
-        _wait_for_port(host, smtp_port)
-        _wait_for_port(host, imap_port)
+        _wait_for_smtp_banner(host, smtp_port)
+        _wait_for_imap_banner(host, imap_port)
         yield MailServer(
             host=host,
             smtp_port=smtp_port,
