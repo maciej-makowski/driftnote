@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pytest import TempPathFactory
 
 from driftnote.filesystem.markdown_io import (
     EntryDocument,
@@ -19,7 +20,7 @@ from driftnote.filesystem.markdown_io import (
 )
 
 
-def _doc(**overrides) -> EntryDocument:  # type: ignore[no-untyped-def]
+def _doc(**overrides: object) -> EntryDocument:
     base = EntryDocument(
         date=date(2026, 5, 6),
         mood="💪",
@@ -122,8 +123,8 @@ def test_body_separator_preserved_for_multi_section_entries(tmp_path: Path) -> N
 )
 @settings(max_examples=30, deadline=None)
 def test_round_trip_property(
-    tmp_path_factory, body: str, tags: list[str], mood: str | None
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path_factory: TempPathFactory, body: str, tags: list[str], mood: str | None
+) -> None:
     path = tmp_path_factory.mktemp("entry") / "entry.md"
     doc = _doc(body=body, tags=tags, mood=mood)
     write_entry(path, doc)
