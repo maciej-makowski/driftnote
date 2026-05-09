@@ -97,13 +97,21 @@ loginctl show-user $(whoami) | grep Linger=yes
 
 If that line is missing, run `sudo loginctl enable-linger $(whoami)` once.
 
+Clone the Driftnote repo on the RPi — you'll run the install from inside it (the Makefile in §4 expects to be invoked from the project root):
+
+```bash
+git clone https://github.com/maciej-makowski/driftnote.git
+cd driftnote
+```
+
+The rest of this guide assumes your shell's working directory is that checkout.
+
 ```bash
 # Data + backup directories under your home.
 mkdir -p ~/.driftnote/data ~/.driftnote/backups
 
 # Drop the example config in (you'll edit it next).
-curl -fsSL https://raw.githubusercontent.com/maciej-makowski/driftnote/master/config/config.example.toml \
-    -o ~/.driftnote/config.toml
+cp config/config.example.toml ~/.driftnote/config.toml
 chmod 0644 ~/.driftnote/config.toml
 $EDITOR ~/.driftnote/config.toml
 ```
@@ -133,11 +141,9 @@ EOF
 
 ## 4. Install scripts + systemd units, pull the image, start
 
-The project ships a `Makefile` that bundles the install + start steps into a single command. From a checkout of the repo on the RPi:
+The project ships a `Makefile` that bundles the install + start steps into a single command. From the repo checkout you cloned in §3:
 
 ```bash
-git clone https://github.com/maciej-makowski/driftnote.git
-cd driftnote
 make install
 ```
 
