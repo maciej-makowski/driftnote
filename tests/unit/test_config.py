@@ -119,7 +119,9 @@ def test_missing_secret_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         load_config(p)
 
 
-def test_load_config_raises_on_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_config_raises_on_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DRIFTNOTE_GMAIL_USER", "u@example.com")
     monkeypatch.setenv("DRIFTNOTE_GMAIL_APP_PASSWORD", "p")
     monkeypatch.setenv("DRIFTNOTE_CF_ACCESS_AUD", "aud")
@@ -128,7 +130,9 @@ def test_load_config_raises_on_missing_file(tmp_path: Path, monkeypatch: pytest.
         load_config(tmp_path / "does-not-exist.toml")
 
 
-def test_load_config_raises_on_malformed_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_config_raises_on_malformed_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     p = tmp_path / "config.toml"
     p.write_text("this = is = not = valid\n")
     monkeypatch.setenv("DRIFTNOTE_GMAIL_USER", "u@example.com")
