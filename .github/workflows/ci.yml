@@ -15,11 +15,12 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Set up uv
-        # Pinning latest-major (v8) so we get a uv recent enough to manage
-        # a fully-patched Python 3.14. uv 0.5.x predates 3.14 and resolves
-        # to an incomplete build that's missing PEP-750 ast nodes (mypy crashes
-        # importing ast.TemplateStr).
-        uses: astral-sh/setup-uv@v8
+        # Need a uv recent enough to manage a fully-patched Python 3.14.
+        # uv 0.5.x predates 3.14 and resolves '.python-version: 3.14' to an
+        # incomplete build missing PEP-750 ast nodes (ast.TemplateStr) — mypy
+        # crashes on import. setup-uv only publishes major tags up to v7;
+        # pin v8.1.0 explicitly.
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
