@@ -12,21 +12,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        # Pinning latest-major (v8) so we get a uv recent enough to manage
+        # a fully-patched Python 3.14. uv 0.5.x predates 3.14 and resolves
+        # to an incomplete build that's missing PEP-750 ast nodes (mypy crashes
+        # importing ast.TemplateStr).
+        uses: astral-sh/setup-uv@v8
         with:
-          version: "0.5.x"
           enable-cache: true
 
       - name: Install dependencies
         run: uv sync --frozen
-
-      - name: Reinstall mypy from source
-        # mypy's compiled (mypyc) wheels segfault on ubuntu-latest's Python 3.14
-        # build, but the pure-Python build is stable. Force-reinstall from sdist.
-        run: uv pip install --reinstall --no-binary=mypy "mypy<1.20"
 
       - name: Lint
         run: uv run ruff check src tests
@@ -44,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build container (smoke)
         run: |
           docker build -f Containerfile -t driftnote:ci .
