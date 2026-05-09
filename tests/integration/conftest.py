@@ -7,17 +7,24 @@ import select
 import socket
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
-# Configure testcontainers to use the podman socket (required in Fedora toolbox).
-# Must be set before testcontainers is imported/initialised.
-os.environ.setdefault("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock")
+# Auto-detect the podman rootless socket so this works inside a Fedora toolbox
+# WITHOUT clobbering DOCKER_HOST on machines that have a real Docker daemon
+# (e.g. GitHub Actions ubuntu-latest, where /var/run/docker.sock is the right
+# default). Must run before testcontainers is imported.
+_xdg = os.environ.get("XDG_RUNTIME_DIR")
+if "DOCKER_HOST" not in os.environ and _xdg:
+    _podman_sock = Path(_xdg) / "podman" / "podman.sock"
+    if _podman_sock.exists():
+        os.environ["DOCKER_HOST"] = f"unix://{_podman_sock}"
 os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
-from testcontainers.core.container import DockerContainer
+from testcontainers.core.container import DockerContainer  # noqa: E402
 
-from tests.conftest import MailServer
+from tests.conftest import MailServer  # noqa: E402
 
 
 def _wait_for_smtp_banner(host: str, port: int, timeout: float = 30.0) -> None:
