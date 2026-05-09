@@ -15,7 +15,8 @@ Image=localhost/driftnote:local
 # %h/.driftnote/ are readable. Without this, podman puts the container's
 # UID 1000 (the `driftnote` user inside the image) in the subuid range,
 # and reading config.toml fails with EACCES.
-Userns=keep-id
+# Quadlet uses CamelCase 'UserNS', not 'Userns' — generator is case-sensitive.
+UserNS=keep-id
 Volume=%h/.driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
