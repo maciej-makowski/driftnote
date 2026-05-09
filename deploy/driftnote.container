@@ -7,10 +7,10 @@ Wants=network-online.target
 
 [Container]
 Image=ghcr.io/maciej-makowski/driftnote:latest
-Volume=%h/driftnote:/var/driftnote:Z
+Volume=%h/.driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
-EnvironmentFile=%h/driftnote/driftnote.env
+EnvironmentFile=%h/.driftnote/driftnote.env
 # Host port 8001; if you already use 8001, edit this line + the matching
 # port in deploy/README.md §1's cloudflared `service:` URL. Container-side
 # stays 8000 (uvicorn's default in the image's CMD).

@@ -5,5 +5,5 @@ OnFailure=driftnote-backup-failure.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/driftnote/driftnote.env
+EnvironmentFile=%h/.driftnote/driftnote.env
 ExecStart=%h/.local/lib/driftnote/scripts/backup.sh
