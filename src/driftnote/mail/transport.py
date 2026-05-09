@@ -31,6 +31,7 @@ class SmtpTransport:
     password: str
     sender_address: str
     sender_name: str
+    reply_to: str | None = None  # if set, every outgoing email gets Reply-To: <value>
 
 
 def transports_from_config(cfg: Config) -> tuple[ImapTransport, SmtpTransport]:
@@ -52,5 +53,6 @@ def transports_from_config(cfg: Config) -> tuple[ImapTransport, SmtpTransport]:
         password=cfg.secrets.gmail_app_password.get_secret_value(),
         sender_address=cfg.secrets.gmail_user,
         sender_name=cfg.email.sender_name,
+        reply_to=cfg.email.reply_to,
     )
     return imap, smtp

@@ -84,6 +84,7 @@ def test_transports_from_config_prod() -> None:
         password="p",
         sender_address="you@gmail.com",
         sender_name="Driftnote",
+        reply_to=None,
     )
 
 
@@ -101,3 +102,15 @@ def test_transports_from_config_dev_with_overrides() -> None:
     assert imap.tls is False
     assert smtp.starttls is False
     assert smtp.port == 3025
+
+
+def test_transports_from_config_propagates_reply_to() -> None:
+    cfg = _config(reply_to="you+driftnote@gmail.com")
+    _imap, smtp = transports_from_config(cfg)
+    assert smtp.reply_to == "you+driftnote@gmail.com"
+
+
+def test_transports_from_config_reply_to_defaults_to_none() -> None:
+    cfg = _config()
+    _imap, smtp = transports_from_config(cfg)
+    assert smtp.reply_to is None

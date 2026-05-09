@@ -40,6 +40,8 @@ async def send_email(
     msg = EmailMessage()
     msg["From"] = formataddr((transport.sender_name, transport.sender_address))
     msg["To"] = recipient
+    if transport.reply_to:
+        msg["Reply-To"] = transport.reply_to
     msg["Subject"] = subject
     msg["Date"] = formatdate(time.time(), localtime=True)
     domain = transport.sender_address.split("@", 1)[-1] or "driftnote"

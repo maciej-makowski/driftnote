@@ -12,7 +12,14 @@ timezone       = "Europe/London"
 [email]
 imap_folder            = "Driftnote/Inbox"
 imap_processed_folder  = "Driftnote/Processed"
-recipient              = "you@gmail.com"
+# Recommended: use Gmail plus-addressing so every Driftnote email
+# (prompts + digests + alerts + replies) is filterable by `deliveredto:`.
+# All emails to <you>+<anything>@gmail.com land in <you>@gmail.com's mailbox.
+recipient              = "you+driftnote@gmail.com"
+# Optional. When set, every outgoing email gets a `Reply-To:` header so
+# replies route to the alias instead of the bare From: address. Match this
+# to `recipient` for the cleanest one-line filter rule.
+reply_to               = "you+driftnote@gmail.com"
 sender_name            = "Driftnote"
 imap_host              = "imap.gmail.com"
 imap_port              = 993

@@ -40,6 +40,7 @@ class EmailConfig(BaseModel):
     imap_folder: str
     imap_processed_folder: str
     recipient: str
+    reply_to: str | None = None
     sender_name: str
     imap_host: str
     imap_port: int = Field(ge=1, le=65535)

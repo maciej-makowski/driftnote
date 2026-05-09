@@ -31,7 +31,12 @@ driftnote send-prompt           # manually send today's prompt
 
 1. Enable 2-Step Verification on your Google account.
 2. Google Account → Security → App passwords → "Mail / Other (Driftnote)" → save the 16-character credential.
-3. Settings → Filters and Blocked Addresses → "Create filter" with `subject:"[Driftnote]"` `from:me`. Apply label "Driftnote/Inbox", "Skip Inbox". Make sure the labels `Driftnote/Inbox` and `Driftnote/Processed` exist.
+3. Set both `recipient` and `reply_to` in `config.toml` to a plus-addressed alias of your Gmail, e.g. `you+driftnote@gmail.com`. Gmail delivers `you+anything@gmail.com` to `you@gmail.com`'s mailbox, and the `Reply-To` header makes replies route back to the alias too — so every Driftnote email (prompts, digests, your replies) is filterable by a single `deliveredto:` rule.
+4. Create the labels `Driftnote/Inbox` and `Driftnote/Processed` (Settings → Labels → Create new label).
+5. Create a filter (Settings → Filters and Blocked Addresses → Create filter):
+   - **Has the words:** `deliveredto:you+driftnote@gmail.com`
+   - **Apply label:** `Driftnote/Inbox`, **Skip Inbox**
+6. Send yourself a test prompt (`driftnote send-prompt`) and confirm it lands in `Driftnote/Inbox` with the filter applied.
 
 ## Setting up Cloudflare Access
 

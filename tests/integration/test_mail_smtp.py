@@ -131,3 +131,42 @@ def test_send_with_inline_image_cid(mail_server: MailServer) -> None:
     raw = _fetch_via_imap(mail_server)
     assert b"Content-ID: <photo1@driftnote>" in raw
     assert b"Content-Disposition: inline" in raw
+
+
+def test_send_with_reply_to_header(mail_server: MailServer) -> None:
+    """When the transport carries a reply_to, the outgoing message has Reply-To set."""
+    smtp = SmtpTransport(
+        host=mail_server.host,
+        port=mail_server.smtp_port,
+        tls=False,
+        starttls=False,
+        username=mail_server.user,
+        password=mail_server.password,
+        sender_address=mail_server.address,
+        sender_name="Driftnote",
+        reply_to=f"you+driftnote@{mail_server.address.split('@', 1)[-1]}",
+    )
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="reply-to",
+            body_text="testing",
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"Reply-To: you+driftnote@" in raw, "Reply-To header expected on outgoing message"
+
+
+def test_send_without_reply_to_omits_header(mail_server: MailServer) -> None:
+    smtp = _smtp(mail_server)  # default transport: reply_to=None
+    asyncio.run(
+        send_email(
+            smtp,
+            recipient=mail_server.address,
+            subject="no-reply-to",
+            body_text="testing",
+        )
+    )
+    raw = _fetch_via_imap(mail_server)
+    assert b"Reply-To:" not in raw
