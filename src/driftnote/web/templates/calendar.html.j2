@@ -14,12 +14,14 @@
     {% for row in cells %}
       <tr>
       {% for c in row %}
-        <td class="{% if not c.in_month %}dim{% endif %}">
+        <td class="{% if c.in_month %}{% if c.date.isoformat() == today_iso %}today{% endif %}{% else %}dim{% endif %}">
           {% if c.in_month %}
             <a href="/entry/{{ c.date.isoformat() }}">
               <div class="dom">{{ c.day_of_month }}</div>
               <div class="emoji">{{ c.emoji or "·" }}</div>
             </a>
+          {% else %}
+            <div class="dom">{{ c.day_of_month }}</div>
           {% endif %}
         </td>
       {% endfor %}

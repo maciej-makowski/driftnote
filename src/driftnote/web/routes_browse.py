@@ -88,6 +88,7 @@ def install_browse_routes(
                 prev_month=prev_m,
                 next_year=next_y,
                 next_month=next_m,
+                today_iso=iso_now()[:10],
             ),
         )
 

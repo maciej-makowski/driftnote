@@ -74,6 +74,22 @@ def test_search_invalid_fts_returns_200_with_error(app_with_data: tuple[FastAPI,
     assert "invalid" in r.text.lower()
 
 
+def test_calendar_page_renders_pad_cell_day_numbers(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """May 2026 starts Friday: Mon..Thu of week 1 are April 27..30. The grid
+    must render those day numbers in cells flagged dim."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    # Six rows of seven cells each.
+    assert r.text.count("<tr>") == 6 + 1  # 6 body rows + 1 header row
+    # Pad cells carry the dim class and show their day-of-month.
+    assert 'class="dim"' in r.text
+    # April 30 is a pad cell at the start of May 2026 (Thu of week 1).
+    assert ">30<" in r.text
+
+
 def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:
     """Regression: raw HTML in body_md must NOT pass through to the browser (XSS hardening)."""
     eng = make_engine(tmp_path / "xss.sqlite")
