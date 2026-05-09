@@ -89,11 +89,19 @@ pull-registry:
 	@echo "✓ pulled $(REGISTRY_IMAGE) and tagged as $(LOCAL_IMAGE)"
 
 start:
-	@systemctl --user enable --now driftnote.service driftnote-backup.timer
-	@echo "✓ driftnote.service + driftnote-backup.timer enabled and started"
+	@# driftnote.service is generated from the quadlet by podman's quadlet
+	@# generator; `systemctl enable` on generated units fails ("transient or
+	@# generated"). The quadlet's [Install] WantedBy=default.target already
+	@# creates the wants symlink at generation time, so the service autostarts
+	@# on boot/login without `enable`. We just `start` it now.
+	@systemctl --user start driftnote.service
+	@# The backup timer is a regular (non-generated) unit — it does need enable.
+	@systemctl --user enable --now driftnote-backup.timer
+	@echo "✓ driftnote.service started; driftnote-backup.timer enabled and started"
 
 stop:
-	@-systemctl --user disable --now driftnote.service driftnote-backup.timer 2>/dev/null
+	@-systemctl --user stop driftnote.service 2>/dev/null
+	@-systemctl --user disable --now driftnote-backup.timer 2>/dev/null
 	@echo "✓ services stopped"
 
 restart:

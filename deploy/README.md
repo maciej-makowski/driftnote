@@ -147,7 +147,7 @@ The project ships a `Makefile` that bundles the install + start steps into a sin
 make install
 ```
 
-`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `build` (`podman build -f Containerfile -t localhost/driftnote:local .`), and `start` (`systemctl --user enable --now driftnote.service driftnote-backup.timer`).
+`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `build` (`podman build -f Containerfile -t localhost/driftnote:local .`), and `start` (`systemctl --user start driftnote.service` plus `systemctl --user enable --now driftnote-backup.timer`).
 
 The default install builds the image locally from the Containerfile in your checkout — no GitHub interaction is needed beyond the initial `git clone` in §3. If you'd rather pull a prebuilt image from GHCR (and have logged in via `podman login ghcr.io`, since the package is private), run `make pull-registry` instead of `make build` (or as a substitute for `make install`'s build step: `make check-prereqs scripts units pull-registry start`).
 
@@ -173,10 +173,15 @@ install -m 0644 deploy/driftnote-backup.service         ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup-failure.service ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup.timer           ~/.config/systemd/user/
 
-# Build image locally, reload, enable.
+# Build image locally, reload, start.
 podman build -f Containerfile -t localhost/driftnote:local .
 systemctl --user daemon-reload
-systemctl --user enable --now driftnote.service driftnote-backup.timer
+# driftnote.service is quadlet-generated, so we just start it — the
+# quadlet's [Install] WantedBy=default.target already auto-starts it
+# on boot/login. systemctl enable on a generated unit fails.
+systemctl --user start driftnote.service
+# The backup timer is a regular unit, so enable it normally.
+systemctl --user enable --now driftnote-backup.timer
 ```
 
 (If you prefer pulling from GHCR: `podman pull ghcr.io/maciej-makowski/driftnote:latest && podman tag ghcr.io/maciej-makowski/driftnote:latest localhost/driftnote:local`.)
@@ -319,7 +324,8 @@ If a future release introduces a database schema change, the release notes will 
 ## Quick rollback
 
 ```bash
-systemctl --user disable --now driftnote.service driftnote-backup.timer
+systemctl --user stop driftnote.service                       # quadlet-generated; not enabled
+systemctl --user disable --now driftnote-backup.timer         # regular unit; was enabled
 rm -f ~/.config/containers/systemd/driftnote.container
 rm -f ~/.config/systemd/user/driftnote-backup*.{service,timer}
 rm -rf ~/.local/lib/driftnote ~/.driftnote
