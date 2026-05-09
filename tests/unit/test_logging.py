@@ -72,3 +72,32 @@ def test_logging_level_respected(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "kept" in out
     assert "filtered" not in out
+
+
+def test_redact_secrets_recurses_into_nested_dicts() -> None:
+    out = redact_secrets(
+        {
+            "user": "u@example.com",
+            "cfg": {"gmail_app_password": "p", "host": "smtp.gmail.com"},
+            "deeper": {"a": {"token": "t", "ok": "fine"}},
+        }
+    )
+    assert out["user"] == "u@example.com"
+    assert out["cfg"]["gmail_app_password"] == REDACTED
+    assert out["cfg"]["host"] == "smtp.gmail.com"
+    assert out["deeper"]["a"]["token"] == REDACTED
+    assert out["deeper"]["a"]["ok"] == "fine"
+
+
+def test_redact_secrets_recurses_into_lists_of_dicts() -> None:
+    out = redact_secrets(
+        {
+            "items": [
+                {"password": "p1", "name": "alice"},
+                {"password": "p2", "name": "bob"},
+            ],
+        }
+    )
+    assert out["items"][0]["password"] == REDACTED
+    assert out["items"][0]["name"] == "alice"
+    assert out["items"][1]["password"] == REDACTED
