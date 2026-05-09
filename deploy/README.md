@@ -319,6 +319,7 @@ If a future release introduces a database schema change, the release notes will 
 | Reply doesn't appear in the calendar after `poll-responses` | The Gmail filter may be marking the reply as read on arrival, which causes `SEARCH UNSEEN` to skip it. See the "Setting up Gmail" section in the top-level [README.md](../README.md). |
 | Backup timer never fires | `systemctl --user list-timers driftnote-backup.timer` — `Persistent=true` means it fires on the next boot if it missed the scheduled window. |
 | `cloudflared` exits with "failed to get the tunnel credentials" | The credentials JSON path in `config.yml` is wrong or the file is missing. Run `cloudflared tunnel list` to confirm the tunnel exists and check `/root/.cloudflared/` or `/etc/cloudflared/` for the JSON file. |
+| `journalctl --user -u driftnote.service` returns "No journal files were found" | journald's default `Storage=auto` only writes to `/var/log/journal/` if that directory exists; on Debian/Raspberry Pi OS it doesn't, so logs go to volatile `/run/log/journal/` and the per-user journal file is never created. One-time fix: `sudo mkdir -p /var/log/journal && sudo systemd-tmpfiles --create --prefix=/var/log/journal && sudo systemctl kill --kill-who=main --signal=SIGUSR1 systemd-journald`. Or read the system journal directly without persistent setup: `sudo journalctl _UID=$(id -u) --user-unit driftnote.service`. |
 
 ---
 
