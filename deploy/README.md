@@ -147,12 +147,14 @@ The project ships a `Makefile` that bundles the install + start steps into a sin
 make install
 ```
 
-`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `pull` (`podman pull ghcr.io/maciej-makowski/driftnote:latest`), and `start` (`systemctl --user enable --now driftnote.service driftnote-backup.timer`).
+`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `build` (`podman build -f Containerfile -t localhost/driftnote:local .`), and `start` (`systemctl --user enable --now driftnote.service driftnote-backup.timer`).
+
+The default install builds the image locally from the Containerfile in your checkout — no GitHub interaction is needed beyond the initial `git clone` in §3. If you'd rather pull a prebuilt image from GHCR (and have logged in via `podman login ghcr.io`, since the package is private), run `make pull-registry` instead of `make build` (or as a substitute for `make install`'s build step: `make check-prereqs scripts units pull-registry start`).
 
 Run `make help` to see every target. Useful day-to-day:
 - `make status` — service + timer status
 - `make logs` — tail `journalctl --user -u driftnote.service`
-- `make pull && make restart` — refresh the image
+- `make build && make restart` — rebuild the image (after editing the Containerfile or pulling new source) and restart
 - `make units && make restart` — after editing a unit file
 - `make uninstall` — stop services and remove installed files (KEEPS data in `~/.driftnote/`)
 - `make reinstall` — `uninstall` + `install`
@@ -171,11 +173,13 @@ install -m 0644 deploy/driftnote-backup.service         ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup-failure.service ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup.timer           ~/.config/systemd/user/
 
-# Pull image, reload, enable.
-podman pull ghcr.io/maciej-makowski/driftnote:latest
+# Build image locally, reload, enable.
+podman build -f Containerfile -t localhost/driftnote:local .
 systemctl --user daemon-reload
 systemctl --user enable --now driftnote.service driftnote-backup.timer
 ```
+
+(If you prefer pulling from GHCR: `podman pull ghcr.io/maciej-makowski/driftnote:latest && podman tag ghcr.io/maciej-makowski/driftnote:latest localhost/driftnote:local`.)
 
 The `%h` specifier in the shipped unit files expands to your home directory at unit-load time, so the same files work for any user without editing. The quadlet at `~/.config/containers/systemd/driftnote.container` is translated to `driftnote.service` by the user's systemd manager on `daemon-reload`. The backup timer fires on the 1st at 03:00 (your local timezone, since user-mode units default to the user's timezone).
 
@@ -277,13 +281,15 @@ Schedule this via your workstation's cron or Task Scheduler, or run it manually 
 
 ## 7. Update path
 
-When a new image is published:
+To upgrade to a newer release: `git pull` in the repo checkout, rebuild the image, then restart.
 
 ```bash
-podman pull ghcr.io/maciej-makowski/driftnote:latest
-systemctl --user restart driftnote.service
+git pull
+make build && make restart
 journalctl --user -u driftnote.service -n 50   # confirm it came back up cleanly
 ```
+
+(Or, if you're on the GHCR-pull path: `make pull-registry && make restart`.)
 
 If a future release introduces a database schema change, the release notes will include migration instructions. There is no automated migration tooling.
 

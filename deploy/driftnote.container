@@ -6,7 +6,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/maciej-makowski/driftnote:latest
+# `make install` (or `make build`) builds the image locally from the
+# Containerfile and tags it as localhost/driftnote:local. If you'd rather
+# pull a prebuilt image from GHCR, run `make pull-registry` instead — it
+# tags the GHCR image as the same name so this Image= line stays correct.
+Image=localhost/driftnote:local
 Volume=%h/.driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data

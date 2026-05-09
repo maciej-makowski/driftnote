@@ -19,18 +19,19 @@ DATA_DIR       := $(HOME)/.driftnote
 SCRIPTS_DIR    := $(HOME)/.local/lib/driftnote/scripts
 QUADLET_DIR    := $(HOME)/.config/containers/systemd
 USER_UNIT_DIR  := $(HOME)/.config/systemd/user
-IMAGE          := ghcr.io/maciej-makowski/driftnote:latest
+LOCAL_IMAGE    := localhost/driftnote:local
+REGISTRY_IMAGE := ghcr.io/maciej-makowski/driftnote:latest
 
 .DEFAULT_GOAL := help
 .PHONY: help install uninstall reinstall \
-        check-prereqs scripts units pull \
+        check-prereqs scripts units build pull-registry \
         start stop restart status logs
 
 help:
 	@echo "Driftnote rootless install (assumes you're in a checkout of the repo)."
 	@echo ""
 	@echo "Primary targets:"
-	@echo "  install      End-to-end: verify prereqs, copy scripts + units, pull image, enable services."
+	@echo "  install      End-to-end: verify prereqs, copy scripts + units, build image, enable services."
 	@echo "  uninstall    Stop services and remove installed files. Data in ~/.driftnote/ is KEPT."
 	@echo "  reinstall    uninstall + install (handy after editing deploy/* files)."
 	@echo ""
@@ -44,7 +45,8 @@ help:
 	@echo "  check-prereqs  Verify ~/.driftnote/{config.toml,driftnote.env} + linger."
 	@echo "  scripts        Copy backup.sh + alert-email.py to ~/.local/lib/driftnote/scripts/."
 	@echo "  units          Copy quadlet + backup units to ~/.config/, daemon-reload."
-	@echo "  pull           podman pull the image."
+	@echo "  build          podman build -f Containerfile -t localhost/driftnote:local . (default)."
+	@echo "  pull-registry  Alternative to build: pull from GHCR + retag. Requires GHCR auth."
 
 check-prereqs:
 	@test -f "$(DATA_DIR)/config.toml" \
@@ -73,9 +75,18 @@ units:
 	@systemctl --user daemon-reload
 	@echo "✓ units installed; systemd reloaded"
 
-pull:
-	@podman pull "$(IMAGE)"
-	@echo "✓ image pulled"
+build:
+	@podman build -f Containerfile -t "$(LOCAL_IMAGE)" .
+	@echo "✓ image built locally as $(LOCAL_IMAGE)"
+
+# Alternative to `build`: pull a prebuilt image from GHCR. Requires the
+# package to be public, OR `podman login ghcr.io` on this host. Most
+# personal installs are better off with `build`; this target is here for
+# anyone who explicitly prefers the registry path.
+pull-registry:
+	@podman pull "$(REGISTRY_IMAGE)"
+	@podman tag "$(REGISTRY_IMAGE)" "$(LOCAL_IMAGE)"
+	@echo "✓ pulled $(REGISTRY_IMAGE) and tagged as $(LOCAL_IMAGE)"
 
 start:
 	@systemctl --user enable --now driftnote.service driftnote-backup.timer
@@ -95,7 +106,7 @@ status:
 logs:
 	@journalctl --user -u driftnote.service -n 50 -f
 
-install: check-prereqs scripts units pull start
+install: check-prereqs scripts units build start
 	@echo ""
 	@echo "Driftnote installed. Verify with:"
 	@echo "    make status"
