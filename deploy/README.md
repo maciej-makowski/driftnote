@@ -131,48 +131,51 @@ EOF
 
 ---
 
-## 4. Install scripts + systemd units
+## 4. Install scripts + systemd units, pull the image, start
+
+The project ships a `Makefile` that bundles the install + start steps into a single command. From a checkout of the repo on the RPi:
 
 ```bash
-# Pull the project's deploy artefacts.
-git clone https://github.com/maciej-makowski/driftnote.git /tmp/driftnote-source
+git clone https://github.com/maciej-makowski/driftnote.git
+cd driftnote
+make install
+```
 
+`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `pull` (`podman pull ghcr.io/maciej-makowski/driftnote:latest`), and `start` (`systemctl --user enable --now driftnote.service driftnote-backup.timer`).
+
+Run `make help` to see every target. Useful day-to-day:
+- `make status` — service + timer status
+- `make logs` — tail `journalctl --user -u driftnote.service`
+- `make pull && make restart` — refresh the image
+- `make units && make restart` — after editing a unit file
+- `make uninstall` — stop services and remove installed files (KEEPS data in `~/.driftnote/`)
+- `make reinstall` — `uninstall` + `install`
+
+### Manual equivalent (if you don't want to use Make)
+
+```bash
 # User-local scripts directory.
 install -d ~/.local/lib/driftnote/scripts
-install -m 0755 /tmp/driftnote-source/scripts/backup.sh \
-                /tmp/driftnote-source/scripts/alert-email.py \
-                ~/.local/lib/driftnote/scripts/
+install -m 0755 scripts/backup.sh scripts/alert-email.py ~/.local/lib/driftnote/scripts/
 
 # User-mode quadlet (for the container) + user-mode systemd units (for backup).
 install -d ~/.config/containers/systemd ~/.config/systemd/user
-install -m 0644 /tmp/driftnote-source/deploy/driftnote.container          ~/.config/containers/systemd/
-install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup.service     ~/.config/systemd/user/
-install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup-failure.service ~/.config/systemd/user/
-install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup.timer       ~/.config/systemd/user/
+install -m 0644 deploy/driftnote.container              ~/.config/containers/systemd/
+install -m 0644 deploy/driftnote-backup.service         ~/.config/systemd/user/
+install -m 0644 deploy/driftnote-backup-failure.service ~/.config/systemd/user/
+install -m 0644 deploy/driftnote-backup.timer           ~/.config/systemd/user/
 
-rm -rf /tmp/driftnote-source
-```
-
-The `%h` specifier in those unit files expands to your home directory at unit-load time, so the same files work for any user without editing.
-
----
-
-## 5. Pull the image + start
-
-```bash
+# Pull image, reload, enable.
 podman pull ghcr.io/maciej-makowski/driftnote:latest
 systemctl --user daemon-reload
 systemctl --user enable --now driftnote.service driftnote-backup.timer
-
-systemctl --user status driftnote.service     # should be active (running)
-journalctl --user -u driftnote.service -n 30  # tail logs for a few seconds
 ```
 
-The quadlet at `~/.config/containers/systemd/driftnote.container` is translated to `driftnote.service` by the user's systemd manager on `daemon-reload`. The timer fires the backup job on the 1st at 03:00 (your local timezone, since user-mode units default to the user's timezone).
+The `%h` specifier in the shipped unit files expands to your home directory at unit-load time, so the same files work for any user without editing. The quadlet at `~/.config/containers/systemd/driftnote.container` is translated to `driftnote.service` by the user's systemd manager on `daemon-reload`. The backup timer fires on the 1st at 03:00 (your local timezone, since user-mode units default to the user's timezone).
 
 ---
 
-## 6. Post-deploy verification
+## 5. Post-deploy verification
 
 **From a workstation** (not the RPi), verify the tunnel + Access chain is working:
 
@@ -204,7 +207,7 @@ Open `https://driftnote.<your-domain>/` in your browser — the calendar should 
 
 ---
 
-## 7. Backups + cloud copy
+## 6. Backups + cloud copy
 
 The local backup timer drops a `tar.zst` snapshot in `~/.driftnote/backups/` on the 1st of each month at 03:00. Local retention defaults to 12 months. For off-host copies, pick one of the options below.
 
@@ -266,7 +269,7 @@ Schedule this via your workstation's cron or Task Scheduler, or run it manually 
 
 ---
 
-## 8. Update path
+## 7. Update path
 
 When a new image is published:
 
@@ -280,7 +283,7 @@ If a future release introduces a database schema change, the release notes will 
 
 ---
 
-## 9. Rotating credentials
+## 8. Rotating credentials
 
 - **Gmail App Password compromised:** Google Account → Security → App passwords → revoke the Driftnote entry → generate a new one → update `DRIFTNOTE_GMAIL_APP_PASSWORD` in `~/.driftnote/driftnote.env` → `systemctl --user restart driftnote.service`.
 - **Cloudflare AUD compromised:** Zero Trust dashboard → Access → Applications → Driftnote → ⋯ (three-dot menu) → **Refresh Application Audience (AUD)**. Copy the new value into `driftnote.env` → restart the service. Old JWTs are rejected immediately by Cloudflare once the AUD changes.
