@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Monthly backup: tar.zst of data/entries + config.toml.
-# Writes a row into /var/driftnote/data/index.sqlite job_runs.
+# Writes a row into ~/.driftnote/data/index.sqlite job_runs.
 # Optionally encrypts the archive via age if BACKUP_ENCRYPT=true.
 #
-# Invoked by /etc/systemd/system/driftnote-backup.service (oneshot timer).
+# Invoked by ~/.config/systemd/user/driftnote-backup.service (oneshot timer).
 
 set -euo pipefail
 
-DATA_ROOT="${DATA_ROOT:-/var/driftnote}"
+DATA_ROOT="${DATA_ROOT:-${HOME}/.driftnote}"
 BACKUP_DIR="$DATA_ROOT/backups"
 NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MONTH_TAG="$(date -u +%Y-%m)"

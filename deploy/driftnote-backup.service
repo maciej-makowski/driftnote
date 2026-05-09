@@ -1,11 +1,9 @@
-# Install: copy to /etc/systemd/system/driftnote-backup.service.
+# Install: copy to ~/.config/systemd/user/driftnote-backup.service.
 [Unit]
 Description=Driftnote monthly backup
 OnFailure=driftnote-backup-failure.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/driftnote/driftnote.env
-ExecStart=/usr/local/lib/driftnote/scripts/backup.sh
-User=driftnote
-Group=driftnote
+EnvironmentFile=%h/.driftnote/driftnote.env
+ExecStart=%h/.local/lib/driftnote/scripts/backup.sh

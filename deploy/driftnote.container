@@ -1,21 +1,34 @@
-# Install: copy to /etc/containers/systemd/driftnote.container, then
-#   systemctl daemon-reload && systemctl enable --now driftnote.container
+# Install: copy to ~/.config/containers/systemd/driftnote.container, then
+#   systemctl --user daemon-reload && systemctl --user enable --now driftnote.service
 [Unit]
 Description=Driftnote app
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/maciej-makowski/driftnote:latest
-Volume=/var/driftnote:/var/driftnote:Z
+# `make install` (or `make build`) builds the image locally from the
+# Containerfile and tags it as localhost/driftnote:local. If you'd rather
+# pull a prebuilt image from GHCR, run `make pull-registry` instead — it
+# tags the GHCR image as the same name so this Image= line stays correct.
+Image=localhost/driftnote:local
+# Map the host user 1:1 into the container so bind-mounted files in
+# %h/.driftnote/ are readable. Without this, podman puts the container's
+# UID 1000 (the `driftnote` user inside the image) in the subuid range,
+# and reading config.toml fails with EACCES.
+# Quadlet uses CamelCase 'UserNS', not 'Userns' — generator is case-sensitive.
+UserNS=keep-id
+Volume=%h/.driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
-EnvironmentFile=/etc/driftnote/driftnote.env
-PublishPort=127.0.0.1:8000:8000
+EnvironmentFile=%h/.driftnote/driftnote.env
+# Host port 8001; if you already use 8001, edit this line + the matching
+# port in deploy/README.md §1's cloudflared `service:` URL. Container-side
+# stays 8000 (uvicorn's default in the image's CMD).
+PublishPort=127.0.0.1:8001:8000
 
 [Service]
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
