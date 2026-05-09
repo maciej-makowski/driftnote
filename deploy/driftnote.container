@@ -11,7 +11,10 @@ Volume=%h/driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
 EnvironmentFile=%h/driftnote/driftnote.env
-PublishPort=127.0.0.1:8000:8000
+# Host port 8001; if you already use 8001, edit this line + the matching
+# port in deploy/README.md §1's cloudflared `service:` URL. Container-side
+# stays 8000 (uvicorn's default in the image's CMD).
+PublishPort=127.0.0.1:8001:8000
 
 [Service]
 Restart=on-failure

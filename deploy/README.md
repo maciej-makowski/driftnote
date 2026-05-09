@@ -45,7 +45,10 @@ tunnel: <tunnel-uuid>
 credentials-file: /root/.cloudflared/<tunnel-uuid>.json
 ingress:
   - hostname: driftnote.<your-domain>
-    service: http://127.0.0.1:8000
+    # Driftnote's quadlet maps the container's port 8000 to host 8001 by
+    # default (so it doesn't collide with another tunneled app on 8000).
+    # If you change it in deploy/driftnote.container, change it here too.
+    service: http://127.0.0.1:8001
   - service: http_status:404
 ```
 
