@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 from email.utils import make_msgid
+from pathlib import Path as _Path
+
+import pytest as _pytest
 
 from driftnote.ingest.parse import (
     parse_reply,
@@ -122,3 +125,32 @@ def test_parse_picks_plain_body_over_html_when_both_present() -> None:
     parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
     assert "plain text version" in parsed.body
     assert "<p>" not in parsed.body
+
+
+_FIXTURE_DIR = _Path(__file__).parent.parent / "fixtures" / "emails"
+
+
+@_pytest.mark.parametrize(
+    "fixture_name,expected_body_substr,expected_mood",
+    [
+        ("reply_outlook_web.eml", "Outlook web reply body", "💪"),
+        ("reply_apple_mail_macos.eml", "Apple Mail macOS reply body", "🌧️"),
+        ("reply_iphone_gmail_app.eml", "iPhone Gmail body", "🎉"),
+        ("reply_french_locale.eml", "Journée tranquille au café", "☕"),
+        ("reply_outlook_separator_line.eml", "Old-school Outlook reply", "😴"),
+    ],
+)
+def test_parse_strips_quoted_block_for_real_clients(
+    fixture_name: str, expected_body_substr: str, expected_mood: str
+) -> None:
+    raw = (_FIXTURE_DIR / fixture_name).read_bytes()
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#(\w+)")
+    assert parsed.mood == expected_mood
+    assert expected_body_substr in parsed.body
+    # The original prompt should never bleed into the parsed body.
+    assert "How was 2026-05-09" not in parsed.body
+    assert "Comment s'est passée" not in parsed.body  # French prompt
+    # Outlook's "From: <sender> Sent: ... Subject: ..." block must be stripped.
+    assert "Sent: Saturday" not in parsed.body
+    # The "Sent from my iPhone" signature is treated as user content here —
+    # acceptable; the intent of this test is the QUOTED prompt is stripped.

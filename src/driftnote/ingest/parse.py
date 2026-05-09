@@ -40,9 +40,25 @@ class ParsedReply:
     attachments: list[AttachmentMaterial]
 
 
+# Each pattern matches the FIRST line of a quoted-reply header block. The
+# stripper truncates the body at the earliest such line. Order does not
+# matter — we pick the earliest position regardless of which pattern matched.
 _QUOTE_HEADER_PATTERNS = (
+    # Gmail / many clients: "On <date>, <name> wrote:"
     re.compile(r"^On\s+.+\s+wrote:\s*$", re.MULTILINE),
-    re.compile(r"^From:\s+.+$", re.MULTILINE),  # Outlook-style "From:" thread headers
+    # French locale (Apple Mail / Gmail FR): "Le <date> ..., <name> a écrit :"
+    re.compile(r"^Le\s+.+\s+a\s+écrit\s*:\s*$", re.MULTILINE),
+    # German locale: "Am <date> schrieb <name>:"
+    re.compile(r"^Am\s+.+\s+schrieb\s+.+:\s*$", re.MULTILINE),
+    # Polish locale: "<date> <name> napisał(a):"
+    re.compile(r"^.+\s+napisał(?:a|\(a\))?\s*:\s*$", re.MULTILINE),
+    # Outlook web: long underscore separator above the From: block.
+    re.compile(r"^_{3,}\s*$", re.MULTILINE),
+    # Outlook desktop / Exchange: explicit "-----Original Message-----" separator.
+    re.compile(r"^-{3,}\s*Original\s+Message\s*-{3,}\s*$", re.MULTILINE),
+    # Outlook bare "From:" header (kept last as a defensive catch — only
+    # fires if none of the more specific separators above matched).
+    re.compile(r"^From:\s+.+$", re.MULTILINE),
 )
 
 
