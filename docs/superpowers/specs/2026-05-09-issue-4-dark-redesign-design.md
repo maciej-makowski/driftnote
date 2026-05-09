@@ -121,7 +121,7 @@ The two palettes are intentionally not shared via variables — the email is a s
 ### Tag cloud (`tags.html.j2`)
 - Pills: `background: --bg-raised`, `color: --fg`, `padding: 2px 8px`. No `border-radius`. No border.
 - Frequency-based font-size: keep current formula (`0.8 + count*0.1` rem).
-- Inline-style on `<a>` is acceptable here (it's a generated dynamic value); other inline styles are removed per "Out of scope" rule below.
+- Inline-style on `<a>` is acceptable here (it's a generated dynamic value driven by tag frequency); other static inline styles in admin/search templates are removed per the rules in those sections.
 
 ### Entry view (`entry.html.j2`)
 - Wrap content with a 4px `border-left: 4px solid --accent` on `<article class="entry">` plus 16px `padding-left`.
@@ -152,7 +152,7 @@ The two palettes are intentionally not shared via variables — the email is a s
 - Strip the inline `style="padding:8px;border-radius:4px"` from the error banner — the global `.banner-warn` rule handles it.
 
 ### Email digest (`monthly.py`)
-- Pull all inline color literals (`#222`, `#ccc`) into a small palette dict at the top of the function (or module-level constant).
+- Pull all inline color literals (`#222`, `#ccc`) into a module-level palette constant (`_DIGEST_PALETTE: dict[str, str]`) at the top of `monthly.py`. Function bodies reference this constant — no inline literals remain.
 - Calendar grid: pad cells now show day-of-month (matching web). `--fg-dim`-equivalent (`#c4c2cc`) text.
 - Add 1px `border-left: 4px solid <accent>` to the digest's intro section, mirroring the entry-view pattern in the web UI.
 - Typography: h1/h2 sizes match the web's hierarchy.
@@ -175,7 +175,7 @@ The two palettes are intentionally not shared via variables — the email is a s
 | `tests/unit/test_digest_moodboard.py` | Assert `len(rows) == 6` always; pad cells carry `day_of_month` |
 | `tests/integration/test_web_routes_browse.py` | Assert calendar HTML contains 6 weeks; pad-cell day numbers present |
 | `tests/integration/test_web_routes_media_and_admin.py` | Adjust if assertions check for old text-only status labels |
-| `tests/unit/test_digest_monthly_render.py` (new) | Snapshot-style assertions: digest HTML contains the new palette colors and the pad cells render day numbers |
+| `tests/unit/test_digest_monthly_render.py` (new) | In-test substring assertions: digest HTML contains the palette accent (`#6c4fc4`), the muted pad-cell color (`#c4c2cc`), and pad-cell day numbers. Not a committed `.html` snapshot — palette tweaks should not require fixture refreshes |
 
 ### Decision: tag size — class vs inline style
 
@@ -191,7 +191,7 @@ Current template uses `style="font-size: {{ 0.8 + (count*0.1) }}rem"`. For a gen
 - [ ] All existing tests pass (browse, edit, admin, moodboard).
 - [ ] New tests cover: 6-row guarantee, pad-cell day numbers, digest light-palette presence.
 - [ ] PR description contains screenshots: calendar (desktop + mobile), entry view, edit view, admin, monthly digest email render.
-- [ ] No `border-radius` in the codebase except: status dots (`50%`), and any photo/video thumbnail rules — verified by grep on the final stylesheet.
+- [ ] No `border-radius` in the codebase except status dots (`50%`) — verified by grep on the final stylesheet.
 
 ## Risks and mitigations
 
