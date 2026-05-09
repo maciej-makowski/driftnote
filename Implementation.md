@@ -40,3 +40,24 @@ This document captures the *why* behind structural decisions. Most of the *what*
 - WAL + 5s busy-timeout makes concurrent writes from the host-side backup script and the in-container app safe.
 - The backup script runs OUTSIDE the container (host-side systemd timer); it writes a `job_runs` row directly to the same SQLite file.
 - Digest cron expressions are evaluated in the configured timezone (`Europe/London` by default), which means DST transitions don't shift digest send times.
+
+### Vendored frontend assets
+
+`src/driftnote/web/static/htmx.min.js` is vendored from
+[unpkg.com/htmx.org@<version>](https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js).
+The pinned version lives in `src/driftnote/web/static/.htmx-version` so
+upgrades are explicit. To bump:
+
+```
+VERSION=$(cat src/driftnote/web/static/.htmx-version)
+echo "current: $VERSION"
+NEW=2.0.5  # set this
+curl -sSf "https://unpkg.com/htmx.org@${NEW}/dist/htmx.min.js" \
+    -o src/driftnote/web/static/htmx.min.js
+echo "$NEW" > src/driftnote/web/static/.htmx-version
+git diff src/driftnote/web/static/
+```
+
+If you want SRI verification, append the SHA-384 digest to `.htmx-version` on
+the line below the version. The page template doesn't use it currently, but
+having it on disk makes adding `integrity="sha384-…"` a one-line change later.
