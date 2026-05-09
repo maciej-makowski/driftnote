@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -82,12 +83,21 @@ def test_calendar_page_renders_pad_cell_day_numbers(
     app, _ = app_with_data
     r = TestClient(app).get("/?year=2026&month=5")
     assert r.status_code == 200
-    # Six rows of seven cells each.
-    assert r.text.count("<tr>") == 6 + 1  # 6 body rows + 1 header row
-    # Pad cells carry the dim class and show their day-of-month.
-    assert 'class="dim"' in r.text
-    # April 30 is a pad cell at the start of May 2026 (Thu of week 1).
-    assert ">30<" in r.text
+    # Six body rows of seven cells each, plus one header row.
+    assert r.text.count("<tr>") == 7
+    # Pad cells live inside <td class="dim"> with a <div class="dom"> day
+    # number. Extract every pad-cell day number to verify the prev-month
+    # tail (Apr 27..30) is rendered — these days do not collide with any
+    # in-month May date and so prove the {% else %} branch of the template
+    # actually runs.
+    pad_doms = re.findall(
+        r'<td class="dim">\s*<div class="dom">(\d+)</div>',
+        r.text,
+    )
+    assert "27" in pad_doms
+    assert "28" in pad_doms
+    assert "29" in pad_doms
+    assert "30" in pad_doms
 
 
 def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:

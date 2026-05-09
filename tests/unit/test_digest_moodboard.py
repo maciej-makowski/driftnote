@@ -53,6 +53,11 @@ def test_monthly_moodboard_pad_cells_carry_day_of_month() -> None:
     assert all(1 <= c.day_of_month <= 31 for c in pad)
     # No emoji on pad cells (we don't carry mood data outside the target month).
     assert all(c.emoji is None for c in pad)
+    # Concrete pad-date pins: May 2026 starts Fri so week 1 leads with
+    # Apr 27..30, and trailing pad cells in week 6 are early June.
+    pad_dates = sorted(c.date for c in pad)
+    assert pad_dates[0] == date(2026, 4, 27)
+    assert pad_dates[-1].month == 6 and pad_dates[-1].year == 2026
 
 
 def test_yearly_grid_53_weeks_max() -> None:
