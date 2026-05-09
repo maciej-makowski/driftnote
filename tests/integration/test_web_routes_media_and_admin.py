@@ -30,7 +30,9 @@ def setup(tmp_path: Path) -> tuple[FastAPI, Engine, Path]:
     (entry_dir / "thumbs" / "photo.jpg").write_bytes(b"\xff\xd8\xff\xd9")
     app = FastAPI()
     install_media_routes(app, data_root=data_root)
-    install_admin_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    install_admin_routes(
+        app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z", environment="prod"
+    )
     return app, eng, data_root
 
 
@@ -91,3 +93,50 @@ def test_admin_acknowledge(setup: tuple[FastAPI, Engine, Path]) -> None:
             session, now="2026-05-06T12:00:00Z", days=7, only_unacknowledged=True
         )
     assert unack == []
+
+
+def test_admin_test_controls_hidden_in_prod(setup: tuple[FastAPI, Engine, Path]) -> None:
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/admin")
+    assert r.status_code == 200
+    assert "Test controls" not in r.text
+
+
+def test_admin_test_controls_visible_in_dev(tmp_path: Path) -> None:
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    app = FastAPI()
+    install_admin_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z", environment="dev")
+    r = TestClient(app).get("/admin")
+    assert r.status_code == 200
+    assert "Test controls" in r.text
+    # Each of the five buttons is present.
+    assert 'action="/admin/test/send-prompt"' in r.text
+    assert 'action="/admin/test/send-digest/weekly"' in r.text
+    assert 'action="/admin/test/send-digest/monthly"' in r.text
+    assert 'action="/admin/test/send-digest/yearly"' in r.text
+    assert 'action="/admin/test/poll-now"' in r.text
+
+
+def test_admin_test_endpoints_404_in_prod(setup: tuple[FastAPI, Engine, Path]) -> None:
+    fapp, _, _ = setup
+    client = TestClient(fapp)
+    for path in (
+        "/admin/test/send-prompt",
+        "/admin/test/send-digest/weekly",
+        "/admin/test/send-digest/monthly",
+        "/admin/test/send-digest/yearly",
+        "/admin/test/poll-now",
+    ):
+        r = client.post(path)
+        assert r.status_code == 404, f"{path} should 404 in prod, got {r.status_code}"
+
+
+def test_admin_notice_banner_renders_when_query_param_set(tmp_path: Path) -> None:
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    app = FastAPI()
+    install_admin_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z", environment="dev")
+    r = TestClient(app).get("/admin?notice=prompt-sent")
+    assert r.status_code == 200
+    assert "prompt-sent" in r.text
