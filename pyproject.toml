@@ -46,7 +46,9 @@ dev = [
     "freezegun>=1.5",
     "testcontainers>=4.8",
     "ruff>=0.7",
-    "mypy>=1.13",
+    # mypy 2.0.0 (released 2026-05-06) segfaults on Python 3.14 in CI; pin to 1.x.
+    # Re-evaluate when 2.0.x patches land.
+    "mypy>=1.13,<2",
     "pre-commit>=4.0",
     "types-requests",
     "types-pyyaml",
