@@ -1,5 +1,5 @@
-# Install: copy to /etc/containers/systemd/driftnote.container, then
-#   systemctl daemon-reload && systemctl enable --now driftnote.container
+# Install: copy to ~/.config/containers/systemd/driftnote.container, then
+#   systemctl --user daemon-reload && systemctl --user enable --now driftnote.service
 [Unit]
 Description=Driftnote app
 After=network-online.target
@@ -7,10 +7,10 @@ Wants=network-online.target
 
 [Container]
 Image=ghcr.io/maciej-makowski/driftnote:latest
-Volume=/var/driftnote:/var/driftnote:Z
+Volume=%h/driftnote:/var/driftnote:Z
 Environment=DRIFTNOTE_CONFIG=/var/driftnote/config.toml
 Environment=DRIFTNOTE_DATA_ROOT=/var/driftnote/data
-EnvironmentFile=/etc/driftnote/driftnote.env
+EnvironmentFile=%h/driftnote/driftnote.env
 PublishPort=127.0.0.1:8000:8000
 
 [Service]
@@ -18,4 +18,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

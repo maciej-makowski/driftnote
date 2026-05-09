@@ -3,5 +3,5 @@ Description=Driftnote backup failure alert
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/driftnote/driftnote.env
-ExecStart=/usr/local/lib/driftnote/scripts/alert-email.py "Driftnote backup failed" "See journalctl -u driftnote-backup.service for details."
+EnvironmentFile=%h/driftnote/driftnote.env
+ExecStart=%h/.local/lib/driftnote/scripts/alert-email.py "Driftnote backup failed" "See journalctl --user -u driftnote-backup.service for details."

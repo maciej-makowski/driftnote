@@ -84,28 +84,25 @@ In the **Cloudflare Zero Trust dashboard** (`one.dash.cloudflare.com` → your a
 
 ## 3. RPi prep
 
-Create a dedicated service account, the data directories, and the secrets directory:
+> **Rootless install:** this guide runs Driftnote as your login user, not a dedicated service account. Data and secrets live under `~/driftnote/`; systemd units are user-mode. If you ever want the system-mode rootful setup instead, substitute `~/driftnote` → `/var/driftnote`, `~/driftnote/driftnote.env` → `/etc/driftnote/driftnote.env`, install paths to `/etc/containers/systemd/` and `/etc/systemd/system/`, and prefix every `systemctl --user` with `sudo systemctl`.
+
+Your RPi must have linger enabled for your user (so user-mode units survive logout). Check:
 
 ```bash
-# Service account — no login shell, home in /var/driftnote
-sudo useradd -r -m -d /var/driftnote -s /sbin/nologin driftnote
-
-# Data + backup directories, owned by the service account
-sudo install -d -o driftnote -g driftnote /var/driftnote/data /var/driftnote/backups
-
-# Secrets directory — root-owned, not readable by the service account
-sudo install -d -m 0700 -o root -g root /etc/driftnote
+loginctl show-user $(whoami) | grep Linger=yes
 ```
 
-Download the example config and edit it:
+If that line is missing, run `sudo loginctl enable-linger $(whoami)` once.
 
 ```bash
-sudo curl -fsSL \
-  https://raw.githubusercontent.com/maciej-makowski/driftnote/master/config/config.example.toml \
-  -o /var/driftnote/config.toml
-sudo chown driftnote:driftnote /var/driftnote/config.toml
-sudo chmod 0644 /var/driftnote/config.toml
-sudo $EDITOR /var/driftnote/config.toml
+# Data + backup directories under your home.
+mkdir -p ~/driftnote/data ~/driftnote/backups
+
+# Drop the example config in (you'll edit it next).
+curl -fsSL https://raw.githubusercontent.com/maciej-makowski/driftnote/master/config/config.example.toml \
+    -o ~/driftnote/config.toml
+chmod 0644 ~/driftnote/config.toml
+$EDITOR ~/driftnote/config.toml
 ```
 
 Set at minimum:
@@ -114,10 +111,10 @@ Set at minimum:
 - `[email].reply_to = "<you>+driftnote@gmail.com"`
 - `[schedule].timezone` — e.g. `"Europe/London"`
 
-Create `/etc/driftnote/driftnote.env` with the secrets (root-owned, mode 0600):
+Create `~/driftnote/driftnote.env` with the secrets (mode 0600, your user-owned):
 
 ```bash
-sudo install -m 0600 -o root -g root /dev/stdin /etc/driftnote/driftnote.env <<'EOF'
+install -m 0600 /dev/stdin ~/driftnote/driftnote.env <<'EOF'
 DRIFTNOTE_GMAIL_USER=<you>@gmail.com
 DRIFTNOTE_GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
 DRIFTNOTE_CF_ACCESS_AUD=<the-long-hex-aud-tag>
@@ -133,46 +130,42 @@ EOF
 
 ## 4. Install scripts + systemd units
 
-Clone the repository to a temporary location and install the artefacts:
-
 ```bash
+# Pull the project's deploy artefacts.
 git clone https://github.com/maciej-makowski/driftnote.git /tmp/driftnote-source
 
-sudo install -d /usr/local/lib/driftnote/scripts
-sudo install -m 0755 \
-  /tmp/driftnote-source/scripts/backup.sh \
-  /tmp/driftnote-source/scripts/alert-email.py \
-  /usr/local/lib/driftnote/scripts/
+# User-local scripts directory.
+install -d ~/.local/lib/driftnote/scripts
+install -m 0755 /tmp/driftnote-source/scripts/backup.sh \
+                /tmp/driftnote-source/scripts/alert-email.py \
+                ~/.local/lib/driftnote/scripts/
 
-sudo install -m 0644 \
-  /tmp/driftnote-source/deploy/driftnote.container \
-  /etc/containers/systemd/
-
-sudo install -m 0644 \
-  /tmp/driftnote-source/deploy/driftnote-backup.service \
-  /tmp/driftnote-source/deploy/driftnote-backup-failure.service \
-  /tmp/driftnote-source/deploy/driftnote-backup.timer \
-  /etc/systemd/system/
+# User-mode quadlet (for the container) + user-mode systemd units (for backup).
+install -d ~/.config/containers/systemd ~/.config/systemd/user
+install -m 0644 /tmp/driftnote-source/deploy/driftnote.container          ~/.config/containers/systemd/
+install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup.service     ~/.config/systemd/user/
+install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup-failure.service ~/.config/systemd/user/
+install -m 0644 /tmp/driftnote-source/deploy/driftnote-backup.timer       ~/.config/systemd/user/
 
 rm -rf /tmp/driftnote-source
 ```
+
+The `%h` specifier in those unit files expands to your home directory at unit-load time, so the same files work for any user without editing.
 
 ---
 
 ## 5. Pull the image + start
 
 ```bash
-sudo podman pull ghcr.io/maciej-makowski/driftnote:latest
-sudo systemctl daemon-reload
-sudo systemctl enable --now driftnote.container driftnote-backup.timer
+podman pull ghcr.io/maciej-makowski/driftnote:latest
+systemctl --user daemon-reload
+systemctl --user enable --now driftnote.service driftnote-backup.timer
+
+systemctl --user status driftnote.service     # should be active (running)
+journalctl --user -u driftnote.service -n 30  # tail logs for a few seconds
 ```
 
-`daemon-reload` translates the quadlet source file (`driftnote.container`) into a real `.service` unit. After that, the running unit is named `driftnote.service`:
-
-```bash
-sudo systemctl status driftnote.service    # should show active (running)
-sudo journalctl -u driftnote.service -f    # tail logs; Ctrl-C when you see "Uvicorn running"
-```
+The quadlet at `~/.config/containers/systemd/driftnote.container` is translated to `driftnote.service` by the user's systemd manager on `daemon-reload`. The timer fires the backup job on the 1st at 03:00 (your local timezone, since user-mode units default to the user's timezone).
 
 ---
 
@@ -192,16 +185,16 @@ If `curl` returns a Cloudflare login redirect, open the URL in a browser first t
 **From the RPi**, test the full email path:
 
 ```bash
-# 2. Send a manual journal prompt.
-sudo podman exec systemd-driftnote driftnote send-prompt
+# Send a manual journal prompt.
+podman exec systemd-driftnote driftnote send-prompt
 # Confirm the prompt lands in your Driftnote/Inbox Gmail label within a minute or two.
 ```
 
 Reply to the prompt from your phone or Gmail web, then:
 
 ```bash
-# 3. Force an immediate IMAP poll (don't wait for the scheduled cron).
-sudo podman exec systemd-driftnote driftnote poll-responses
+# Force an immediate IMAP poll (don't wait for the scheduled cron).
+podman exec systemd-driftnote driftnote poll-responses
 ```
 
 Open `https://driftnote.<your-domain>/` in your browser — the calendar should show today's date with your reply attached.
@@ -210,7 +203,7 @@ Open `https://driftnote.<your-domain>/` in your browser — the calendar should 
 
 ## 7. Backups + cloud copy
 
-The local backup timer drops a `tar.zst` snapshot in `/var/driftnote/backups/` on the 1st of each month at 03:00. Local retention defaults to 12 months. For off-host copies, pick one of the options below.
+The local backup timer drops a `tar.zst` snapshot in `~/driftnote/backups/` on the 1st of each month at 03:00. Local retention defaults to 12 months. For off-host copies, pick one of the options below.
 
 ### Option A: rclone systemd timer on the RPi (preferred)
 
@@ -220,12 +213,12 @@ sudo dnf install -y rclone
 # Ubuntu:
 # sudo apt install -y rclone
 
-# Configure a remote (OneDrive, Backblaze B2, S3, etc.) as the driftnote user:
-sudo -u driftnote rclone config
+# Configure a remote (OneDrive, Backblaze B2, S3, etc.):
+rclone config
 # Walk through the interactive wizard; note the remote name you choose (e.g. "onedrive").
 ```
 
-Create `/etc/systemd/system/driftnote-cloud-sync.service`:
+Create `~/.config/systemd/user/driftnote-cloud-sync.service`:
 
 ```ini
 [Unit]
@@ -234,11 +227,10 @@ After=driftnote-backup.service
 
 [Service]
 Type=oneshot
-User=driftnote
-ExecStart=/usr/bin/rclone sync /var/driftnote/backups onedrive:driftnote-backups
+ExecStart=/usr/bin/rclone sync %h/driftnote/backups onedrive:driftnote-backups
 ```
 
-Create `/etc/systemd/system/driftnote-cloud-sync.timer`:
+Create `~/.config/systemd/user/driftnote-cloud-sync.timer`:
 
 ```ini
 [Unit]
@@ -255,8 +247,8 @@ WantedBy=timers.target
 Enable the timer:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now driftnote-cloud-sync.timer
+systemctl --user daemon-reload
+systemctl --user enable --now driftnote-cloud-sync.timer
 ```
 
 ### Option B: Manual rclone/scp from a workstation
@@ -264,7 +256,7 @@ sudo systemctl enable --now driftnote-cloud-sync.timer
 Keeps credentials entirely off the RPi if you prefer.
 
 ```bash
-rclone sync user@rpi:/var/driftnote/backups onedrive:driftnote-backups
+rclone sync user@rpi:driftnote/backups onedrive:driftnote-backups
 ```
 
 Schedule this via your workstation's cron or Task Scheduler, or run it manually after each monthly backup.
@@ -276,9 +268,9 @@ Schedule this via your workstation's cron or Task Scheduler, or run it manually 
 When a new image is published:
 
 ```bash
-sudo podman pull ghcr.io/maciej-makowski/driftnote:latest
-sudo systemctl restart driftnote.service
-sudo journalctl -u driftnote.service -n 50   # confirm it came back up cleanly
+podman pull ghcr.io/maciej-makowski/driftnote:latest
+systemctl --user restart driftnote.service
+journalctl --user -u driftnote.service -n 50   # confirm it came back up cleanly
 ```
 
 If a future release introduces a database schema change, the release notes will include migration instructions. There is no automated migration tooling.
@@ -287,7 +279,7 @@ If a future release introduces a database schema change, the release notes will 
 
 ## 9. Rotating credentials
 
-- **Gmail App Password compromised:** Google Account → Security → App passwords → revoke the Driftnote entry → generate a new one → update `DRIFTNOTE_GMAIL_APP_PASSWORD` in `/etc/driftnote/driftnote.env` → `sudo systemctl restart driftnote.service`.
+- **Gmail App Password compromised:** Google Account → Security → App passwords → revoke the Driftnote entry → generate a new one → update `DRIFTNOTE_GMAIL_APP_PASSWORD` in `~/driftnote/driftnote.env` → `systemctl --user restart driftnote.service`.
 - **Cloudflare AUD compromised:** Zero Trust dashboard → Access → Applications → Driftnote → ⋯ (three-dot menu) → **Refresh Application Audience (AUD)**. Copy the new value into `driftnote.env` → restart the service. Old JWTs are rejected immediately by Cloudflare once the AUD changes.
 
 ---
@@ -298,8 +290,25 @@ If a future release introduces a database schema change, the release notes will 
 |---|---|
 | `curl https://driftnote.<your-domain>/healthz` redirects to Cloudflare login | Expected — Access is working. Authenticate in a browser first; the cookie allows subsequent `curl` calls from the same machine. |
 | 403 from `/healthz` after login | AUD or team-domain mismatch in `driftnote.env`. Compare `DRIFTNOTE_CF_ACCESS_AUD` and `DRIFTNOTE_CF_TEAM_DOMAIN` against the values on the Access Application Overview tab. |
-| `systemctl status driftnote.service` shows the container exiting immediately | `journalctl -u driftnote.service` — usual suspects: missing or mis-typed env vars (config validation fails fast on startup), or `/var/driftnote/data` has wrong ownership. |
-| Daily prompt doesn't arrive | Run `sudo podman exec systemd-driftnote driftnote send-prompt` to test the SMTP path. If that works, the scheduler is the issue — check `/admin` (after authenticating through Access) for `daily_prompt` job history. |
+| `systemctl --user status driftnote.service` shows the container exiting immediately | `journalctl --user -u driftnote.service` — usual suspects: missing or mis-typed env vars (config validation fails fast on startup), or `~/driftnote/data` has wrong permissions. |
+| Daily prompt doesn't arrive | Run `podman exec systemd-driftnote driftnote send-prompt` to test the SMTP path. If that works, the scheduler is the issue — check `/admin` (after authenticating through Access) for `daily_prompt` job history. |
 | Reply doesn't appear in the calendar after `poll-responses` | The Gmail filter may be marking the reply as read on arrival, which causes `SEARCH UNSEEN` to skip it. See the "Setting up Gmail" section in the top-level [README.md](../README.md). |
-| Backup timer never fires | `systemctl list-timers driftnote-backup.timer` — `Persistent=true` means it fires on the next boot if it missed the scheduled window. |
+| Backup timer never fires | `systemctl --user list-timers driftnote-backup.timer` — `Persistent=true` means it fires on the next boot if it missed the scheduled window. |
 | `cloudflared` exits with "failed to get the tunnel credentials" | The credentials JSON path in `config.yml` is wrong or the file is missing. Run `cloudflared tunnel list` to confirm the tunnel exists and check `/root/.cloudflared/` or `/etc/cloudflared/` for the JSON file. |
+
+---
+
+## Quick rollback
+
+```bash
+systemctl --user disable --now driftnote.service driftnote-backup.timer
+rm -f ~/.config/containers/systemd/driftnote.container
+rm -f ~/.config/systemd/user/driftnote-backup*.{service,timer}
+rm -rf ~/.local/lib/driftnote ~/driftnote
+systemctl --user daemon-reload
+# Cloudflare Tunnel stays rootful; remove with:
+sudo systemctl disable --now cloudflared
+sudo rm -rf /etc/cloudflared
+```
+
+Cloudflare Tunnel + Access are stateless on the dashboard side; delete the tunnel + application via the Zero Trust dashboard if you want a fully clean slate.
