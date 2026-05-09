@@ -1,0 +1,22 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ entry.date }} — Driftnote{% endblock %}
+{% block content %}
+<article class="entry">
+  <h1>{{ entry.date }} {% if entry.mood %}<span class="mood">{{ entry.mood }}</span>{% endif %}</h1>
+  <p class="tags">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
+  <div class="body">{{ body_html|safe }}</div>
+  <section class="media">
+    {% for m in media if m.kind == "photo" %}
+      <a href="/media/{{ entry.date }}/web/{{ m.filename | replace('.heic', '.jpg') }}">
+        <img src="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.heic', '.jpg') }}" alt="">
+      </a>
+    {% endfor %}
+    {% for m in media if m.kind == "video" %}
+      <video controls preload="none" poster="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.', '_') }}.jpg">
+        <source src="/media/{{ entry.date }}/original/{{ m.filename }}">
+      </video>
+    {% endfor %}
+  </section>
+  <p><a href="/entry/{{ entry.date }}/edit">Edit</a></p>
+</article>
+{% endblock %}

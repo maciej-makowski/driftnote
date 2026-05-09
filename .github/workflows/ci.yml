@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up uv
+        # Need a uv recent enough to manage a fully-patched Python 3.14.
+        # uv 0.5.x predates 3.14 and resolves '.python-version: 3.14' to an
+        # incomplete build missing PEP-750 ast nodes (ast.TemplateStr) — mypy
+        # crashes on import. setup-uv only publishes major tags up to v7;
+        # pin v8.1.0 explicitly.
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Format check
+        run: uv run ruff format --check src tests
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Tests (excluding live)
+        run: uv run pytest -m "not live" -v --cov=driftnote --cov-report=term-missing
+
+  build-container:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build container (smoke)
+        run: |
+          docker build -f Containerfile -t driftnote:ci .

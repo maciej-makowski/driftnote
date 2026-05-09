@@ -1,0 +1,10 @@
+{% extends "base.html.j2" %}
+{% block title %}Tags — Driftnote{% endblock %}
+{% block content %}
+<h1>Tags</h1>
+<ul class="tag-cloud">
+  {% for tag, count in tags %}
+    <li><a href="/?tag={{ tag }}" style="font-size:{{ 0.8 + (count*0.1) }}rem">#{{ tag }} ({{ count }})</a></li>
+  {% endfor %}
+</ul>
+{% endblock %}

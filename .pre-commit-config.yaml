@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (unit, fast)
+        entry: uv run pytest -q -m "not live and not slow" tests/unit
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
