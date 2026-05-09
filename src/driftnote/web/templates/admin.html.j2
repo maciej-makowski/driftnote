@@ -2,16 +2,17 @@
 {% block title %}Admin — Driftnote{% endblock %}
 {% block content %}
 {% if notice %}
-  <p class="notice" style="padding:8px;border:1px solid #6c6;border-radius:4px;background:#eaffea">
-    {{ notice }}
-  </p>
+  <p class="notice">{{ notice }}</p>
 {% endif %}
 <h1>Admin</h1>
 <section class="job-cards">
 {% for card in cards %}
   <article class="card">
     <h2>{{ card.job }}</h2>
-    <p>Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}{% if card.last_detail %} ({{ card.last_detail }}){% endif %}</p>
+    <p>
+      <span class="dot {{ card.dot_class }}"></span>
+      Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}{% if card.last_detail %} ({{ card.last_detail }}){% endif %}
+    </p>
     <p>Last success: {{ card.last_success_at or "(never)" }}</p>
     <p>Failures (30d): {{ card.failures_30d }}</p>
     <a href="/admin/runs/{{ card.job }}">history</a>
@@ -20,17 +21,17 @@
 </section>
 
 {% if dev_mode %}
-  <section class="test-controls" style="margin-top:24px;padding:12px;border:2px dashed #c66;border-radius:6px;background:#fff8f8">
-    <h2 style="margin-top:0">Test controls (dev only)</h2>
-    <p style="color:#888;margin:4px 0 12px">
+  <section class="test-controls">
+    <h2>Test controls (dev only)</h2>
+    <p class="hint">
       Synchronously dispatches the listed scheduled job. The result lands in
       the corresponding card above (refresh after a couple of seconds).
     </p>
-    <form method="post" action="/admin/test/send-prompt" style="display:inline-block;margin:4px"><button>Send today's prompt</button></form>
-    <form method="post" action="/admin/test/send-digest/weekly" style="display:inline-block;margin:4px"><button>Send weekly digest</button></form>
-    <form method="post" action="/admin/test/send-digest/monthly" style="display:inline-block;margin:4px"><button>Send monthly digest</button></form>
-    <form method="post" action="/admin/test/send-digest/yearly" style="display:inline-block;margin:4px"><button>Send yearly digest</button></form>
-    <form method="post" action="/admin/test/poll-now" style="display:inline-block;margin:4px"><button>Poll responses now</button></form>
+    <form method="post" action="/admin/test/send-prompt"><button>Send today's prompt</button></form>
+    <form method="post" action="/admin/test/send-digest/weekly"><button>Send weekly digest</button></form>
+    <form method="post" action="/admin/test/send-digest/monthly"><button>Send monthly digest</button></form>
+    <form method="post" action="/admin/test/send-digest/yearly"><button>Send yearly digest</button></form>
+    <form method="post" action="/admin/test/poll-now"><button>Poll responses now</button></form>
   </section>
 {% endif %}
 

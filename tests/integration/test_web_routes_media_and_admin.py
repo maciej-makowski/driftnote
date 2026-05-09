@@ -140,3 +140,21 @@ def test_admin_notice_banner_renders_when_query_param_set(tmp_path: Path) -> Non
     r = TestClient(app).get("/admin?notice=prompt-sent")
     assert r.status_code == 200
     assert "prompt-sent" in r.text
+
+
+def test_admin_renders_status_dot_class(setup: tuple[FastAPI, Engine, Path]) -> None:
+    """Each job card includes a colored dot reflecting last_status."""
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(
+            session,
+            run_id=rid,
+            finished_at="2026-05-06T08:00:01Z",
+            status="error",
+            error_kind="imap_auth",
+        )
+    r = TestClient(fapp).get("/admin")
+    assert r.status_code == 200
+    # The error dot appears in the imap_poll card.
+    assert 'class="dot dot-error"' in r.text
