@@ -26,14 +26,33 @@ def test_weekly_moodboard_seven_cells_with_emojis_or_dot() -> None:
     assert cells[0].label == "Mon"
 
 
-def test_monthly_moodboard_returns_calendar_rows() -> None:
+def test_monthly_moodboard_returns_six_rows_always() -> None:
+    """Every month renders as exactly 6 weeks for stable visual rhythm."""
     days = [_day("2026-05-01"), _day("2026-05-15", mood="🌧️"), _day("2026-05-31", mood="🎉")]
     rows = monthly_moodboard_grid(year=2026, month=5, days=days)
-    # May 2026 spans 6 calendar weeks.
-    assert len(rows) >= 5
+    assert len(rows) == 6
     flat = [c for row in rows for c in row]
     moods = [c.emoji for c in flat if c.in_month and c.day_of_month == 1]
     assert moods == ["💪"]
+
+
+def test_monthly_moodboard_pads_to_six_rows_for_short_months() -> None:
+    """February 2026 is a short month — naturally fits in 5 rows. Must still pad to 6."""
+    rows = monthly_moodboard_grid(year=2026, month=2, days=[])
+    assert len(rows) == 6
+
+
+def test_monthly_moodboard_pad_cells_carry_day_of_month() -> None:
+    """Prev/next-month pad cells render their actual day number (dimmed in the UI)."""
+    rows = monthly_moodboard_grid(year=2026, month=5, days=[])
+    flat = [c for row in rows for c in row]
+    pad = [c for c in flat if not c.in_month]
+    assert pad, "May 2026 starts on a Friday so there must be pad cells"
+    # Every pad cell carries a real calendar day number 1..31, not None.
+    assert all(isinstance(c.day_of_month, int) for c in pad)
+    assert all(1 <= c.day_of_month <= 31 for c in pad)
+    # No emoji on pad cells (we don't carry mood data outside the target month).
+    assert all(c.emoji is None for c in pad)
 
 
 def test_yearly_grid_53_weeks_max() -> None:

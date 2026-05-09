@@ -21,7 +21,7 @@ class WeeklyCell:
 class MonthlyCell:
     date: date
     in_month: bool  # False for grid pad cells outside this month
-    day_of_month: int | None
+    day_of_month: int  # always populated; pad cells carry the actual prev/next-month day number
     emoji: str | None
 
 
@@ -45,18 +45,19 @@ def weekly_moodboard(*, week_start: date, days: list[DayInput]) -> list[WeeklyCe
 def monthly_moodboard_grid(
     *, year: int, month: int, days: list[DayInput]
 ) -> list[list[MonthlyCell]]:
-    """Calendar grid: rows = weeks, columns = Mon..Sun. Cells outside the
-    target month carry `in_month=False`."""
+    """Calendar grid: rows = weeks, columns = Mon..Sun. Always returns six
+    rows for stable visual rhythm. Cells outside the target month carry
+    `in_month=False` but still expose the prev/next-month day number for
+    rendering as dimmed pad cells."""
     by_date = {d.date: d.mood for d in days}
 
     first = date(year, month, 1)
-    next_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
     # Snap to the Monday of the week containing the 1st.
     grid_start = first - timedelta(days=first.weekday())
     rows: list[list[MonthlyCell]] = []
     cur = grid_start
-    while cur < next_first or cur.weekday() != 0:
+    for _ in range(6):
         row: list[MonthlyCell] = []
         for _ in range(7):
             in_month = cur.month == month and cur.year == year
@@ -64,7 +65,7 @@ def monthly_moodboard_grid(
                 MonthlyCell(
                     date=cur,
                     in_month=in_month,
-                    day_of_month=cur.day if in_month else None,
+                    day_of_month=cur.day,
                     emoji=by_date.get(cur) if in_month else None,
                 )
             )
