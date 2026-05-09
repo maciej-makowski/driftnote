@@ -36,7 +36,8 @@ driftnote send-prompt           # manually send today's prompt
 5. Create a filter (Settings → Filters and Blocked Addresses → Create filter):
    - **Has the words:** `deliveredto:you+driftnote@gmail.com`
    - **Apply label:** `Driftnote/Inbox`, **Skip Inbox**
-6. Send yourself a test prompt (`driftnote send-prompt`) and confirm it lands in `Driftnote/Inbox` with the filter applied.
+   - **Do NOT** check "Mark as read". The IMAP poll uses `SEARCH UNSEEN` to find new replies; pre-marking them as read makes the poller skip them and your entries silently won't appear.
+6. Send yourself a test prompt (`driftnote send-prompt`) and confirm it lands in `Driftnote/Inbox` with the filter applied — and is `Unread` in Gmail's UI.
 
 ## Setting up Cloudflare Access
 
