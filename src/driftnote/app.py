@@ -64,15 +64,18 @@ def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
 
     web_base_url = os.environ.get("DRIFTNOTE_WEB_BASE_URL", "https://driftnote.example.com")
 
+    # Build transports once at app-construction time (pure config parsing, no I/O)
+    # so they are available to install_admin_routes for the dev-mode test controls.
+    imap_t, smtp_t = transports_from_config(config)
+    prompt_body = (Path(__file__).parent / "web" / config.prompt.body_template).read_text()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
         if skip_startup_jobs:
             yield
             return
         scheduler = build_scheduler(timezone=config.schedule.timezone)
-        imap_t, smtp_t = transports_from_config(config)
         sender: AlertSender = _SmtpAlertSender(config)
-        prompt_body = (Path(__file__).parent / "web" / config.prompt.body_template).read_text()
 
         async def _prompt_tick() -> None:
             from datetime import date as _date
@@ -202,7 +205,20 @@ def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
     install_browse_routes(app, engine=engine, iso_now=_iso_now)
     install_edit_routes(app, engine=engine, data_root=data_root, iso_now=_iso_now)
     install_media_routes(app, data_root=data_root)
-    install_admin_routes(app, engine=engine, iso_now=_iso_now)
+    install_admin_routes(
+        app,
+        engine=engine,
+        iso_now=_iso_now,
+        environment=config.environment,
+        smtp=smtp_t if not skip_startup_jobs else None,
+        imap=imap_t if not skip_startup_jobs else None,
+        recipient=config.email.recipient,
+        subject_template=config.prompt.subject_template,
+        body_template_text=prompt_body if not skip_startup_jobs else None,
+        web_base_url=web_base_url,
+        config=config,
+        data_root=data_root,
+    )
     install_static(app)
 
     return app

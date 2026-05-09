@@ -10,7 +10,7 @@ from sqlalchemy import Engine
 
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.repository.jobs import last_run
-from driftnote.scheduler.runner import build_scheduler, job_run
+from driftnote.scheduler.runner import build_scheduler, cron, job_run
 
 
 @pytest.fixture
@@ -53,3 +53,13 @@ def test_build_scheduler_starts_paused() -> None:
     """build_scheduler returns a configured but not-yet-running scheduler."""
     sched = build_scheduler(timezone="Europe/London")
     assert sched.running is False
+
+
+def test_cron_raises_clear_error_on_wrong_field_count() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="cron expression must have 5 fields"):
+        cron("0 21 * * * *", "Europe/London")  # 6 fields: minute hour day month dow EXTRA
+
+    with _pytest.raises(ValueError, match="cron expression must have 5 fields"):
+        cron("0 21 *", "Europe/London")  # 3 fields
