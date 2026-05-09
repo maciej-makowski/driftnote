@@ -42,3 +42,31 @@ sudo podman exec systemd-driftnote driftnote restore-imap --since=YYYY-MM-DD
 | Disk banner stuck | `/admin` → disk_check history. Confirm `disk_state` row matches reality; if you've cleaned up, `sqlite3 .../index.sqlite "DELETE FROM disk_state"` |
 | Backup script alert | `systemctl status driftnote-backup.service` and `journalctl -u driftnote-backup.service` |
 | Cloudflare Access 403s | Confirm AUD tag and team domain in env file match the dashboard. JWKS rotates ~yearly. |
+
+## Live tests against real Gmail
+
+`tests/` contains tests marked `@pytest.mark.live` which talk to a real Gmail account. They're not run in CI (no secrets), but they're useful when changing IMAP/SMTP code or upgrading `aioimaplib`/`aiosmtplib`.
+
+### One-time setup
+
+1. Use a dedicated Gmail account (NOT your real Driftnote account — these tests will create + delete messages).
+2. Enable 2-Step Verification on that account.
+3. Generate an App Password labeled "Driftnote live tests".
+4. Create labels `Driftnote/Inbox` and `Driftnote/Processed` in that account.
+5. Create the same Gmail filter as the production setup (subject contains `[Driftnote]`, apply label, skip inbox, **NOT** mark as read).
+
+### Running
+
+```bash
+export DRIFTNOTE_LIVE_GMAIL_USER="livetest@gmail.com"
+export DRIFTNOTE_LIVE_GMAIL_APP_PASSWORD="xxxxxxxxxxxxxxxx"
+uv run pytest -m live -v
+```
+
+If no live tests exist in the suite (the marker is registered but no test actually carries it), this command exits with `no tests ran`. That's fine — the marker is reserved for future opt-in tests.
+
+### When to run
+
+- After upgrading `aioimaplib` or `aiosmtplib`
+- After changing the OAuth/App Password handling in `mail/transport.py`
+- Before any release that touches the email send/receive path
