@@ -1,4 +1,4 @@
-"""Typer CLI entrypoints: serve, reindex, restore-imap, send-prompt."""
+"""Typer CLI entrypoints: serve, reindex, restore-imap, send-prompt, poll-responses."""
 
 from __future__ import annotations
 
@@ -145,6 +145,17 @@ def send_prompt(
     asyncio.run(_run_send_prompt(date))
 
 
+@app.command(name="poll-responses")
+def poll_responses() -> None:
+    """One-off IMAP poll: drain pending IMAP-move retries and ingest new replies.
+
+    Equivalent to a single tick of the scheduled imap_poll job. Useful for
+    on-demand processing without waiting for the next 5-minute cron tick, or
+    when the scheduler isn't running locally.
+    """
+    asyncio.run(_run_poll_responses())
+
+
 async def _run_restore(since: str, until: str | None) -> None:
     from driftnote.config import load_config
 
@@ -187,6 +198,29 @@ async def _run_restore(since: str, until: str | None) -> None:
             await client.logout()
 
     typer.echo("restore-imap complete")
+
+
+async def _run_poll_responses() -> None:
+    from driftnote.config import load_config
+    from driftnote.mail.transport import transports_from_config
+    from driftnote.repository.jobs import last_run
+    from driftnote.scheduler.poll_job import run_poll_job
+    from driftnote.scheduler.runner import job_run
+
+    config = load_config(Path(os.environ["DRIFTNOTE_CONFIG"]))
+    engine = make_engine(_db_path())
+    init_db(engine)
+    imap_t, _ = transports_from_config(config)
+
+    with job_run(engine, "imap_poll"):
+        await run_poll_job(config=config, engine=engine, data_root=_data_root(), imap=imap_t)
+
+    with session_scope(engine) as session:
+        latest = last_run(session, "imap_poll")
+    if latest is None:
+        typer.echo("poll complete")
+    else:
+        typer.echo(f"poll complete: status={latest.status} finished_at={latest.finished_at}")
 
 
 async def _run_send_prompt(date_str: str | None) -> None:

@@ -20,11 +20,12 @@ Open http://localhost:8000/ — empty calendar; smoke-test by sending an email t
 ## CLI
 
 ```bash
-driftnote serve                 # start the web app
+driftnote serve                 # start the web app + scheduler
 driftnote reindex               # rebuild SQLite from filesystem
 driftnote reindex --from-raw    # also re-derive entry.md from raw/*.eml
 driftnote restore-imap --since=2026-05-01
 driftnote send-prompt           # manually send today's prompt
+driftnote poll-responses        # one-off IMAP poll: ingest new replies now
 ```
 
 ## Setting up Gmail (one-time)
