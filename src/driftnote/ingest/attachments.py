@@ -20,7 +20,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pillow_heif
-from PIL import Image
+from PIL import Image, ImageOps
 
 pillow_heif.register_heif_opener()
 
@@ -62,10 +62,17 @@ def derive_photo(
 
     try:
         with Image.open(BytesIO(original_bytes)) as raw_img:
-            rgb = raw_img.convert("RGB")
-            web_img = _resize_max_axis(rgb, WEB_MAX_AXIS)
-            web_img.save(web_path, "JPEG", quality=85, optimize=True)  # EXIF stripped
-            thumb_img = _resize_max_axis(rgb, THUMB_MAX_AXIS)
+            # Bake the EXIF orientation into pixel data before stripping EXIF
+            # on save. Phone JPEGs commonly store sensor-orientation pixels
+            # with Orientation=6 (rotate 90 CW) — without exif_transpose the
+            # derivative shows up sideways for any viewer that doesn't read
+            # EXIF (most browsers DO read it now, but stripping the tag means
+            # they can't, so we must rotate the pixels).
+            img = ImageOps.exif_transpose(raw_img)
+            img = img.convert("RGB")
+            web_img = _resize_max_axis(img, WEB_MAX_AXIS)
+            web_img.save(web_path, "JPEG", quality=85, optimize=True)
+            thumb_img = _resize_max_axis(img, THUMB_MAX_AXIS)
             thumb_img.save(thumb_path, "JPEG", quality=80, optimize=True)
     except Exception:
         return AttachmentArtifacts(
