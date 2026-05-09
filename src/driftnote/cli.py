@@ -235,10 +235,16 @@ async def _run_send_prompt(date_str: str | None) -> None:
 
     today = _date.fromisoformat(date_str) if date_str else _date.today()
 
-    body_template_path = (
-        Path("src/driftnote/web/templates") / config.prompt.body_template.split("/")[-1]
-    )
-    body = body_template_path.read_text() if body_template_path.exists() else "How was {date}?"
+    # Mirror the path-resolution used by the lifespan in driftnote.app.create_app
+    # so CLI-driven and scheduler-driven sends use the same template.
+    web_root = Path(__file__).parent / "web"
+    body_template_path = web_root / config.prompt.body_template
+    if not body_template_path.exists():
+        raise typer.BadParameter(
+            f"prompt template not found at {body_template_path}; "
+            f"check [prompt].body_template in {os.environ['DRIFTNOTE_CONFIG']}",
+        )
+    body = body_template_path.read_text(encoding="utf-8")
 
     await run_prompt_job(
         engine=engine,

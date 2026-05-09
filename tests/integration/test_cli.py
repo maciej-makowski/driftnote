@@ -231,3 +231,72 @@ def test_poll_responses_ingests_pending_reply(
     assert entry.mood == "💪"
     entry_md = data_root / "entries" / "2026" / "05" / "06" / "entry.md"
     assert entry_md.exists()
+
+
+def test_send_prompt_renders_full_template_body(
+    mail_server: MailServer,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The full multi-line prompt template is sent, not the placeholder fallback."""
+    cfg_path = tmp_path / "config.toml"
+    _write_min_config(cfg_path)
+    data_root = tmp_path / "data"
+    db_path = data_root / "index.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    eng = make_engine(db_path)
+    init_db(eng)
+
+    # Wipe GreenMail INBOX so we read only the message this test sends.
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    with contextlib.suppress(Exception):
+        mb.select("INBOX")
+        mb.store("1:*", "+FLAGS", r"\Deleted")
+        mb.expunge()
+    mb.logout()
+
+    monkeypatch.setenv("DRIFTNOTE_CONFIG", str(cfg_path))
+    monkeypatch.setenv("DRIFTNOTE_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("DRIFTNOTE_DB_PATH", str(db_path))
+    monkeypatch.setenv("DRIFTNOTE_GMAIL_USER", mail_server.user)
+    monkeypatch.setenv("DRIFTNOTE_GMAIL_APP_PASSWORD", mail_server.password)
+    monkeypatch.setenv("DRIFTNOTE_CF_ACCESS_AUD", "aud")
+    monkeypatch.setenv("DRIFTNOTE_CF_TEAM_DOMAIN", "team.example.com")
+    monkeypatch.setenv("DRIFTNOTE_ENVIRONMENT", "dev")
+    monkeypatch.setenv("DRIFTNOTE_SMTP_HOST", mail_server.host)
+    monkeypatch.setenv("DRIFTNOTE_SMTP_PORT", str(mail_server.smtp_port))
+    monkeypatch.setenv("DRIFTNOTE_SMTP_TLS", "false")
+    monkeypatch.setenv("DRIFTNOTE_SMTP_STARTTLS", "false")
+
+    result = runner.invoke(cli_app, ["send-prompt", "--date", "2026-05-09"])
+    assert result.exit_code == 0, result.output
+
+    # Fetch the just-sent prompt and confirm body content.
+    import email as _email
+
+    mb = imaplib.IMAP4(mail_server.host, mail_server.imap_port)
+    mb.login(mail_server.user, mail_server.password)
+    mb.select("INBOX")
+    typ, data = mb.search(None, "ALL")
+    assert typ == "OK" and data[0], "no message in INBOX"
+    typ, msg_data = mb.fetch(data[0].split()[-1], "(RFC822)")
+    assert msg_data and isinstance(msg_data[0], tuple), "unexpected fetch response"
+    raw: bytes = msg_data[0][1]
+    mb.logout()
+
+    # Decode the body (may be base64-encoded when the template has non-ASCII chars).
+    msg = _email.message_from_bytes(raw)
+    payload = msg.get_payload(decode=True)
+    assert isinstance(payload, bytes), "could not decode email body"
+    body_text = payload.decode("utf-8")
+
+    # The full-template markers prove we sent the real template
+    # rather than the "How was {date}?" placeholder.
+    assert "Mood: <one emoji>" in body_text, body_text
+    assert "hashtags anywhere in the body" in body_text
+    assert "Up to 4 photos and 2 videos as attachments." in body_text
+    assert "— Driftnote" in body_text  # em-dash + Driftnote signature
+    # And the date placeholder substituted correctly.
+    assert "How was 2026-05-09?" in body_text
