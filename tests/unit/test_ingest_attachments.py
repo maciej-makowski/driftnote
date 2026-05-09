@@ -132,3 +132,38 @@ def test_derive_photo_handles_unreadable_original(tmp_path: Path) -> None:
     assert artifacts.original_path.exists()
     assert artifacts.web_path is None
     assert artifacts.thumb_path is None
+
+
+def test_derive_photo_applies_exif_orientation(tmp_path: Path) -> None:
+    """A JPEG marked Orientation=6 (rotate 90° CW) should produce a
+    derivative whose pixel dimensions are the post-rotation expected ones.
+
+    Source: 200x150 with Orientation=6 means the 'logical' image is 150x200.
+    The web/thumb derivatives must reflect 150x200 (longest axis = 200).
+    """
+    from io import BytesIO
+
+    from PIL import Image as _Image
+
+    src = _Image.new("RGB", (200, 150), color=(60, 100, 180))
+    # ExifTags.Base.Orientation == 0x0112 == 274. Tag value 6 = "Rotate 90 CW".
+    exif = src.getexif()
+    exif[0x0112] = 6
+    buf = BytesIO()
+    src.save(buf, "JPEG", exif=exif.tobytes(), quality=85)
+    raw = buf.getvalue()
+
+    artifacts = derive_photo(
+        original_bytes=raw,
+        original_filename="rotated.jpg",
+        originals_dir=tmp_path / "originals",
+        web_dir=tmp_path / "web",
+        thumbs_dir=tmp_path / "thumbs",
+    )
+    assert artifacts.web_path is not None
+    assert artifacts.thumb_path is not None
+    with Image.open(artifacts.web_path) as web:
+        assert web.size == (150, 200), f"expected post-rotation 150x200 in web copy, got {web.size}"
+    # Original is preserved verbatim — its pixel data is still 200x150 with
+    # Orientation=6, even though the rendered display is 150x200.
+    assert artifacts.original_path.read_bytes() == raw
