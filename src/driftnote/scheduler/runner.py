@@ -84,7 +84,13 @@ def build_scheduler(*, timezone: str) -> AsyncIOScheduler:
 
 def cron(expr: str, tz: str) -> CronTrigger:
     """Build a CronTrigger from a 5-field cron string in the given tz."""
-    minute, hour, day, month, day_of_week = expr.split()
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError(
+            f"cron expression must have 5 fields (minute hour day month dow), "
+            f"got {len(fields)} in {expr!r}"
+        )
+    minute, hour, day, month, day_of_week = fields
     return CronTrigger(
         minute=minute,
         hour=hour,

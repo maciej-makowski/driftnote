@@ -68,3 +68,23 @@ def test_no_recent_backup_warning(engine: Engine) -> None:
         finish_job_run(session, run_id=rid, finished_at="2026-03-01T03:00:10Z", status="ok")
     banners = compute_banners(engine, now="2026-05-06T12:00:00Z")
     assert any(b.level == "warn" and "backup" in b.message.lower() for b in banners)
+
+
+def test_no_banners_when_no_backup_history(engine: Engine) -> None:
+    """A fresh install with no backup runs at all should NOT show the banner."""
+    banners = compute_banners(engine, now="2026-05-09T12:00:00Z")
+    assert banners == []
+
+
+def test_warn_banner_when_last_backup_is_stale(engine: Engine) -> None:
+    """A backup ran 40 days ago, no recent run since → amber banner."""
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="backup", started_at="2026-03-01T03:00:00Z")
+        finish_job_run(
+            session,
+            run_id=rid,
+            finished_at="2026-03-01T03:00:10Z",
+            status="ok",
+        )
+    banners = compute_banners(engine, now="2026-05-09T12:00:00Z")
+    assert any("backup" in b.message.lower() and b.level == "warn" for b in banners)
