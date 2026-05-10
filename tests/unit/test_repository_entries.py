@@ -21,6 +21,7 @@ from driftnote.repository.entries import (
     search_fts,
     tag_frequencies_in_range,
     tags_by_date_in_range,
+    tags_for_dates,
     upsert_entry,
 )
 
@@ -175,3 +176,38 @@ def test_tags_by_date_in_range_excludes_out_of_range(engine: Engine) -> None:
     with session_scope(engine) as session:
         result = tags_by_date_in_range(session, "2026-05-01", "2026-05-31")
     assert result == {}
+
+
+def test_tags_for_dates_empty_input_returns_empty_dict(engine: Engine) -> None:
+    """An empty list short-circuits to {} without hitting the DB."""
+    with session_scope(engine) as session:
+        result = tags_for_dates(session, [])
+    assert result == {}
+
+
+def test_tags_for_dates_returns_one_entry_per_listed_date(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-06"))
+        upsert_entry(session, _record(date="2026-05-08"))
+        upsert_entry(session, _record(date="2026-05-10"))
+        replace_tags(session, "2026-05-06", ["work", "cooking"])
+        replace_tags(session, "2026-05-08", ["holiday"])
+        replace_tags(session, "2026-05-10", ["work", "rest"])
+    with session_scope(engine) as session:
+        result = tags_for_dates(session, ["2026-05-06", "2026-05-10"])
+    # Only the listed dates appear; tags are sorted within each date.
+    assert result == {
+        "2026-05-06": ["cooking", "work"],
+        "2026-05-10": ["rest", "work"],
+    }
+
+
+def test_tags_for_dates_omits_dates_with_no_tags(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        upsert_entry(session, _record(date="2026-05-06"))
+        upsert_entry(session, _record(date="2026-05-08"))
+        replace_tags(session, "2026-05-06", ["work"])
+    with session_scope(engine) as session:
+        result = tags_for_dates(session, ["2026-05-06", "2026-05-08", "2026-05-09"])
+    # 2026-05-08 has no tags; 2026-05-09 has no entry. Both absent.
+    assert result == {"2026-05-06": ["work"]}

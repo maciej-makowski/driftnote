@@ -1,10 +1,11 @@
 {% extends "base.html.j2" %}
+{% from "_macros.html.j2" import tag_chip %}
 {% block title %}Tags — Driftnote{% endblock %}
 {% block content %}
 <h1>Tags</h1>
 <ul class="tag-cloud">
   {% for tag, count in tags %}
-    <li><a href="/?tag={{ tag }}" style="font-size:{{ 0.8 + (count*0.1) }}rem">#{{ tag }} ({{ count }})</a></li>
+    <li>{{ tag_chip(tag, count=count, size_rem=0.8 + count * 0.1) }}</li>
   {% endfor %}
 </ul>
 {% endblock %}

@@ -1,0 +1,5 @@
+{# Shared template macros. Import via `{% from "_macros.html.j2" import tag_chip %}` #}
+
+{%- macro tag_chip(tag, count=none, size_rem=none) -%}
+<a href="/?tag={{ tag }}" class="tag-chip"{% if size_rem %} style="font-size: {{ size_rem }}rem"{% endif %}>#{{ tag }}{% if count is not none %} ({{ count }}){% endif %}</a>
+{%- endmacro %}

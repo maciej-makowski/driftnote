@@ -88,12 +88,16 @@ a:hover { color: var(--accent-hover); }
 
 /* Tag cloud */
 .tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
-.tag-cloud a {
+
+/* Tag chips (entry view, tags cloud, search results) */
+.tag-chip {
   background: var(--bg-raised);
-  color: var(--fg);
+  color: var(--fg-muted);
   padding: 2px 8px;
+  font-size: 13px;
+  margin-right: 6px;
 }
-.tag-cloud a:hover { background: var(--bg-hover); color: var(--accent); }
+.tag-chip:hover { background: var(--bg-hover); color: var(--accent); }
 
 /* Entry view */
 .entry {
@@ -101,14 +105,6 @@ a:hover { color: var(--accent-hover); }
   padding: 4px 0 4px 16px;
 }
 .entry .mood { font-size: 26px; }
-.entry .tags a {
-  background: var(--bg-raised);
-  color: var(--fg-muted);
-  padding: 2px 8px;
-  margin-right: 6px;
-  font-size: 13px;
-}
-.entry .tags a:hover { background: var(--bg-hover); color: var(--accent); }
 .entry .media img { max-width: 240px; margin: 4px; }
 .entry .media video { max-width: 100%; }
 
