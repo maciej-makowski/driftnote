@@ -30,6 +30,17 @@ from driftnote.repository.media import list_media
 from driftnote.web.banners import compute_banners
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+# Pages rendering DB-derived state must not be cached by the browser, otherwise
+# a 303 redirect after a save can serve a stale snapshot from before the edit
+# (see #23). `no-store` is the strongest directive — it disables both memory
+# and disk cache. We apply it narrowly: only HTML views that show user data;
+# `/static/*` is unaffected and remains CDN-friendly.
+_NO_STORE = "no-store"
+
+
+def _no_store(response: HTMLResponse) -> HTMLResponse:
+    response.headers["Cache-Control"] = _NO_STORE
+    return response
 
 
 def install_browse_routes(
@@ -53,10 +64,12 @@ def install_browse_routes(
         if tag:
             with session_scope(engine) as session:
                 entries = list_entries_by_tag(session, tag)
-            return templates.TemplateResponse(
-                request,
-                "search.html.j2",
-                _ctx(q=f"#{tag}", results=entries),
+            return _no_store(
+                templates.TemplateResponse(
+                    request,
+                    "search.html.j2",
+                    _ctx(q=f"#{tag}", results=entries),
+                )
             )
 
         today = _date.today()
@@ -82,20 +95,22 @@ def install_browse_routes(
         cells = monthly_moodboard_grid(year=y, month=m, days=days)
         prev_y, prev_m = (y, m - 1) if m > 1 else (y - 1, 12)
         next_y, next_m = (y, m + 1) if m < 12 else (y + 1, 1)
-        return templates.TemplateResponse(
-            request,
-            "calendar.html.j2",
-            _ctx(
-                year=y,
-                month=m,
-                month_name=_cal.month_name[m],
-                cells=cells,
-                prev_year=prev_y,
-                prev_month=prev_m,
-                next_year=next_y,
-                next_month=next_m,
-                today_iso=iso_now()[:10],
-            ),
+        return _no_store(
+            templates.TemplateResponse(
+                request,
+                "calendar.html.j2",
+                _ctx(
+                    year=y,
+                    month=m,
+                    month_name=_cal.month_name[m],
+                    cells=cells,
+                    prev_year=prev_y,
+                    prev_month=prev_m,
+                    next_year=next_y,
+                    next_month=next_m,
+                    today_iso=iso_now()[:10],
+                ),
+            )
         )
 
     @app.get("/entry/{date_str}", response_class=HTMLResponse)
@@ -112,10 +127,12 @@ def install_browse_routes(
         body_html = md.render(entry.body_md)
         with session_scope(engine) as session:
             tags = list_tags_for_date(session, date_str)
-        return templates.TemplateResponse(
-            request,
-            "entry.html.j2",
-            _ctx(entry=entry, body_html=body_html, media=media, tags=tags),
+        return _no_store(
+            templates.TemplateResponse(
+                request,
+                "entry.html.j2",
+                _ctx(entry=entry, body_html=body_html, media=media, tags=tags),
+            )
         )
 
     @app.get("/tags", response_class=HTMLResponse)
@@ -123,7 +140,7 @@ def install_browse_routes(
         with session_scope(engine) as session:
             freq = tag_frequencies_in_range(session, "0001-01-01", "9999-12-31")
         ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
-        return templates.TemplateResponse(request, "tags.html.j2", _ctx(tags=ranked))
+        return _no_store(templates.TemplateResponse(request, "tags.html.j2", _ctx(tags=ranked)))
 
     @app.get("/search", response_class=HTMLResponse)
     async def search_view(request: Request, q: str | None = Query(None)) -> HTMLResponse:
@@ -137,8 +154,10 @@ def install_browse_routes(
                 orig = getattr(exc, "orig", None)
                 msg = orig.args[0] if orig and orig.args else str(exc)
                 error = f"invalid search query: {msg}"
-        return templates.TemplateResponse(
-            request, "search.html.j2", _ctx(q=q, results=results, error=error)
+        return _no_store(
+            templates.TemplateResponse(
+                request, "search.html.j2", _ctx(q=q, results=results, error=error)
+            )
         )
 
 
