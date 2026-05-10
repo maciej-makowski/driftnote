@@ -32,6 +32,7 @@ Two call sites:
 # src/driftnote/bootstrap.py
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -50,11 +51,14 @@ def load_env() -> None:
 
     Idempotent. Existing env vars always win (`override=False` on dotenv,
     `setdefault` on derived paths). Safe to call from multiple entry
-    points.
+    points. `python-dotenv` raises `PermissionError` for an unreadable
+    regular file but returns `False` for missing/directory paths;
+    `contextlib.suppress(OSError)` covers the unreadable case so the
+    caller can rely on the function not raising.
     """
     home = driftnote_home()
     env_file = home / ".env"
-    if env_file.exists():
+    with contextlib.suppress(OSError):
         load_dotenv(env_file, override=False)
     os.environ.setdefault("DRIFTNOTE_CONFIG", str(home / "config.toml"))
     os.environ.setdefault("DRIFTNOTE_DATA_ROOT", str(home / "data"))
