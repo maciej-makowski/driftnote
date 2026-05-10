@@ -56,7 +56,11 @@ def install_edit_routes(
             "tags_csv": ", ".join(tags),
             "initial_preview": _md.render(entry.body_md),
         }
-        return templates.TemplateResponse(request, "entry_edit.html.j2", ctx)
+        # Don't let the browser cache the edit form — it reflects DB state
+        # that can change between visits (see #23).
+        rendered = templates.TemplateResponse(request, "entry_edit.html.j2", ctx)
+        rendered.headers["Cache-Control"] = "no-store"
+        return rendered
 
     @app.post("/entry/{date_str}", response_class=HTMLResponse)
     async def save_entry(
