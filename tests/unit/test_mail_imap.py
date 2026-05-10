@@ -54,8 +54,8 @@ def test_connect_raises_on_login_no_response(monkeypatch: pytest.MonkeyPatch) ->
     def _factory(*_args: object, **_kwargs: object) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(imap_mod.aioimaplib, "IMAP4", _factory)
-    monkeypatch.setattr(imap_mod.aioimaplib, "IMAP4_SSL", _factory)
+    monkeypatch.setattr(aioimaplib, "IMAP4", _factory)
+    monkeypatch.setattr(aioimaplib, "IMAP4_SSL", _factory)
 
     with pytest.raises(RuntimeError) as excinfo:
         asyncio.run(imap_mod._connect(_transport()))
@@ -73,8 +73,8 @@ def test_connect_returns_client_on_login_ok(monkeypatch: pytest.MonkeyPatch) -> 
     def _factory(*_args: object, **_kwargs: object) -> _FakeClient:
         return fake
 
-    monkeypatch.setattr(imap_mod.aioimaplib, "IMAP4", _factory)
-    monkeypatch.setattr(imap_mod.aioimaplib, "IMAP4_SSL", _factory)
+    monkeypatch.setattr(aioimaplib, "IMAP4", _factory)
+    monkeypatch.setattr(aioimaplib, "IMAP4_SSL", _factory)
 
     client = asyncio.run(imap_mod._connect(_transport()))
     assert client is fake
