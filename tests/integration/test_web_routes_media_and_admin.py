@@ -142,6 +142,96 @@ def test_admin_notice_banner_renders_when_query_param_set(tmp_path: Path) -> Non
     assert "prompt-sent" in r.text
 
 
+def test_admin_ack_all_acks_every_unacked_failure_for_job(
+    setup: tuple[FastAPI, Engine, Path],
+) -> None:
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        ids = []
+        for hour in (6, 7, 8):
+            rid = record_job_run(session, job="imap_poll", started_at=f"2026-05-06T0{hour}:00:00Z")
+            finish_job_run(
+                session,
+                run_id=rid,
+                finished_at=f"2026-05-06T0{hour}:00:01Z",
+                status="error",
+                error_kind="imap_auth",
+            )
+            ids.append(rid)
+        # An ok run should remain unaffected.
+        ok_id = record_job_run(session, job="imap_poll", started_at="2026-05-06T05:00:00Z")
+        finish_job_run(session, run_id=ok_id, finished_at="2026-05-06T05:00:01Z", status="ok")
+
+    client = TestClient(fapp, follow_redirects=False)
+    r = client.post("/admin/runs/imap_poll/ack-all")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/runs/imap_poll?notice=acked-3"
+
+    # Follow up GET shows the notice and rows now appear acked.
+    r2 = client.get("/admin/runs/imap_poll?notice=acked-3")
+    assert r2.status_code == 200
+    assert "acked-3" in r2.text
+
+    from driftnote.repository.jobs import recent_failures
+
+    with session_scope(eng) as session:
+        unack = recent_failures(
+            session, now="2026-05-06T13:00:00Z", days=7, only_unacknowledged=True
+        )
+    assert unack == []
+
+
+def test_admin_ack_all_button_renders_only_when_two_or_more_unacked(
+    setup: tuple[FastAPI, Engine, Path],
+) -> None:
+    fapp, eng, _ = setup
+    # With a single unacked row, the bulk button must NOT appear.
+    with session_scope(eng) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-05-06T08:00:01Z", status="error")
+    r = TestClient(fapp).get("/admin/runs/imap_poll")
+    assert r.status_code == 200
+    assert "Acknowledge all" not in r.text
+    assert 'action="/admin/runs/imap_poll/ack-all"' not in r.text
+
+    # Add a second unacked row -> button appears with the count interpolated.
+    with session_scope(eng) as session:
+        rid2 = record_job_run(session, job="imap_poll", started_at="2026-05-06T09:00:00Z")
+        finish_job_run(session, run_id=rid2, finished_at="2026-05-06T09:00:01Z", status="warn")
+    r2 = TestClient(fapp).get("/admin/runs/imap_poll")
+    assert r2.status_code == 200
+    assert "Acknowledge all (2)" in r2.text
+    assert 'action="/admin/runs/imap_poll/ack-all"' in r2.text
+
+
+def test_admin_ack_all_does_not_affect_runs_started_after_now(
+    setup: tuple[FastAPI, Engine, Path],
+) -> None:
+    """A run with started_at > now (clock skew or future-dated insert) is left alone."""
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        past1 = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=past1, finished_at="2026-05-06T08:00:01Z", status="error")
+        past2 = record_job_run(session, job="imap_poll", started_at="2026-05-06T09:00:00Z")
+        finish_job_run(session, run_id=past2, finished_at="2026-05-06T09:00:01Z", status="error")
+        # iso_now is 2026-05-06T12:00:00Z (see fixture). This row started after that.
+        future = record_job_run(session, job="imap_poll", started_at="2026-05-06T15:00:00Z")
+        finish_job_run(session, run_id=future, finished_at="2026-05-06T15:00:01Z", status="error")
+    client = TestClient(fapp, follow_redirects=False)
+    r = client.post("/admin/runs/imap_poll/ack-all")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/runs/imap_poll?notice=acked-2"
+
+    from driftnote.repository.jobs import recent_runs_for_job
+
+    with session_scope(eng) as session:
+        rows = recent_runs_for_job(session, "imap_poll")
+    by_id = {r.id: r for r in rows}
+    assert by_id[past1].acknowledged_at is not None
+    assert by_id[past2].acknowledged_at is not None
+    assert by_id[future].acknowledged_at is None
+
+
 def test_admin_renders_status_dot_class(setup: tuple[FastAPI, Engine, Path]) -> None:
     """Each job card includes a colored dot reflecting last_status."""
     fapp, eng, _ = setup

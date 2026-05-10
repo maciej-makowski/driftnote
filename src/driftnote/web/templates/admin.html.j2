@@ -37,6 +37,11 @@
 
 {% if recent_runs is defined %}
 <h2>Runs for {{ job_filter }}</h2>
+{% if unacked_count and unacked_count > 1 %}
+  <form method="post" action="/admin/runs/{{ job_filter }}/ack-all" class="ack-all">
+    <button type="submit">Acknowledge all ({{ unacked_count }})</button>
+  </form>
+{% endif %}
 <table class="runs">
   <thead><tr><th>Started</th><th>Status</th><th>Detail</th><th>Error</th><th>Ack</th></tr></thead>
   <tbody>

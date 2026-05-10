@@ -15,6 +15,7 @@ from driftnote.config import Config
 from driftnote.db import session_scope
 from driftnote.mail.transport import ImapTransport, SmtpTransport
 from driftnote.repository.jobs import (
+    acknowledge_all_for_job,
     acknowledge_run,
     last_run,
     last_successful_run,
@@ -119,10 +120,13 @@ def install_admin_routes(
         return rendered
 
     @app.get("/admin/runs/{job}", response_class=HTMLResponse)
-    async def admin_drill(request: Request, job: str) -> HTMLResponse:
+    async def admin_drill(request: Request, job: str, notice: str | None = None) -> HTMLResponse:
         now = iso_now()
         with session_scope(engine) as session:
             rows = recent_runs_for_job(session, job, limit=100)
+        unacked_count = sum(
+            1 for r in rows if r.status in ("error", "warn") and r.acknowledged_at is None
+        )
         rendered = templates.TemplateResponse(
             request,
             "admin.html.j2",
@@ -131,7 +135,9 @@ def install_admin_routes(
                 "cards": _build_cards(now),
                 "recent_runs": rows,
                 "job_filter": job,
+                "unacked_count": unacked_count,
                 "dev_mode": environment == "dev",
+                "notice": notice,
             },
         )
         rendered.headers["Cache-Control"] = "no-store"
@@ -142,6 +148,12 @@ def install_admin_routes(
         with session_scope(engine) as session:
             acknowledge_run(session, run_id=run_id, at=iso_now())
         return RedirectResponse("/admin", status_code=303)
+
+    @app.post("/admin/runs/{job}/ack-all")
+    async def admin_ack_all(job: str) -> RedirectResponse:
+        with session_scope(engine) as session:
+            count = acknowledge_all_for_job(session, job=job, now=iso_now())
+        return RedirectResponse(f"/admin/runs/{job}?notice=acked-{count}", status_code=303)
 
     def _require_dev() -> None:
         if environment != "dev":

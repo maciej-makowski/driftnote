@@ -10,6 +10,7 @@ from sqlalchemy import Engine
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.repository.jobs import (
     JobRunRecord,
+    acknowledge_all_for_job,
     acknowledge_run,
     finish_job_run,
     last_run,
@@ -157,3 +158,84 @@ def test_recent_runs_for_job_respects_limit(engine: Engine) -> None:
     assert len(rows) == 3
     # Most recent first.
     assert rows[0].id == ids[-1]
+
+
+def test_acknowledge_all_for_job_zero_unacked(engine: Engine) -> None:
+    """No unacked rows -> count is 0 and no rows are touched."""
+    with session_scope(engine) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=rid, finished_at="2026-05-06T08:00:01Z", status="ok")
+    with session_scope(engine) as session:
+        count = acknowledge_all_for_job(session, job="imap_poll", now="2026-05-06T12:00:00Z")
+    assert count == 0
+    with session_scope(engine) as session:
+        latest = last_run(session, "imap_poll")
+    assert latest is not None
+    assert latest.acknowledged_at is None
+
+
+def test_acknowledge_all_for_job_several_unacked(engine: Engine) -> None:
+    """Several unacked error/warn rows are all acked; count matches."""
+    with session_scope(engine) as session:
+        a = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=a, finished_at="2026-05-06T08:00:01Z", status="error")
+        b = record_job_run(session, job="imap_poll", started_at="2026-05-06T09:00:00Z")
+        finish_job_run(session, run_id=b, finished_at="2026-05-06T09:00:01Z", status="warn")
+        c = record_job_run(session, job="imap_poll", started_at="2026-05-06T10:00:00Z")
+        finish_job_run(session, run_id=c, finished_at="2026-05-06T10:00:01Z", status="error")
+    with session_scope(engine) as session:
+        count = acknowledge_all_for_job(session, job="imap_poll", now="2026-05-06T12:00:00Z")
+    assert count == 3
+    with session_scope(engine) as session:
+        unack = recent_failures(
+            session, now="2026-05-06T13:00:00Z", days=7, only_unacknowledged=True
+        )
+    assert unack == []
+
+
+def test_acknowledge_all_for_job_mix_only_touches_unacked(engine: Engine) -> None:
+    """Already-acked rows keep their original acknowledged_at timestamp."""
+    with session_scope(engine) as session:
+        already = record_job_run(session, job="backup", started_at="2026-05-06T06:00:00Z")
+        finish_job_run(session, run_id=already, finished_at="2026-05-06T06:00:01Z", status="error")
+        acknowledge_run(session, run_id=already, at="2026-05-06T07:00:00Z")
+        unacked = record_job_run(session, job="backup", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=unacked, finished_at="2026-05-06T08:00:01Z", status="error")
+    with session_scope(engine) as session:
+        count = acknowledge_all_for_job(session, job="backup", now="2026-05-06T12:00:00Z")
+    assert count == 1
+    # Already-acked row keeps its original timestamp.
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "backup")
+    by_id = {r.id: r for r in rows}
+    assert by_id[already].acknowledged_at == "2026-05-06T07:00:00Z"
+    assert by_id[unacked].acknowledged_at == "2026-05-06T12:00:00Z"
+
+
+def test_acknowledge_all_for_job_skips_other_jobs_and_ok_status(engine: Engine) -> None:
+    """Other jobs and ok/running rows are unaffected."""
+    with session_scope(engine) as session:
+        target = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(session, run_id=target, finished_at="2026-05-06T08:00:01Z", status="error")
+        # Different job, error status — must NOT be acked.
+        other_job = record_job_run(session, job="backup", started_at="2026-05-06T08:30:00Z")
+        finish_job_run(
+            session, run_id=other_job, finished_at="2026-05-06T08:30:01Z", status="error"
+        )
+        # Same job but ok status — must NOT be acked.
+        ok_row = record_job_run(session, job="imap_poll", started_at="2026-05-06T09:00:00Z")
+        finish_job_run(session, run_id=ok_row, finished_at="2026-05-06T09:00:01Z", status="ok")
+        # Same job but started after `now` — must NOT be acked.
+        future = record_job_run(session, job="imap_poll", started_at="2026-05-06T15:00:00Z")
+        finish_job_run(session, run_id=future, finished_at="2026-05-06T15:00:01Z", status="error")
+    with session_scope(engine) as session:
+        count = acknowledge_all_for_job(session, job="imap_poll", now="2026-05-06T12:00:00Z")
+    assert count == 1
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "imap_poll")
+        backup_rows = recent_runs_for_job(session, "backup")
+    by_id = {r.id: r for r in rows}
+    assert by_id[target].acknowledged_at == "2026-05-06T12:00:00Z"
+    assert by_id[ok_row].acknowledged_at is None
+    assert by_id[future].acknowledged_at is None
+    assert backup_rows[0].acknowledged_at is None
