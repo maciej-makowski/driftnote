@@ -59,6 +59,9 @@ def test_tags_page_lists_tags(app_with_data: tuple[FastAPI, Engine]) -> None:
     assert r.status_code == 200
     assert "work" in r.text
     assert "cooking" in r.text
+    # Cloud canvas is rendered with at least one positioned chip.
+    assert 'class="tag-cloud-canvas"' in r.text
+    assert "left:" in r.text
 
 
 def test_search_returns_fts_hits(app_with_data: tuple[FastAPI, Engine]) -> None:
