@@ -14,7 +14,16 @@
     {% for row in cells %}
       <tr>
       {% for c in row %}
-        <td class="{% if c.in_month %}{% if c.date.isoformat() == today_iso %}today{% endif %}{% else %}dim{% endif %}">
+        {%- if not c.in_month -%}
+          {%- set td_class = "dim" -%}
+        {%- elif c.date.isoformat() == today_iso -%}
+          {%- set td_class = "today has-entry" if c.emoji else "today today-empty" -%}
+        {%- elif c.emoji -%}
+          {%- set td_class = "has-entry" -%}
+        {%- else -%}
+          {%- set td_class = "empty" -%}
+        {%- endif %}
+        <td class="{{ td_class }}">
           {% if c.in_month %}
             <a href="/entry/{{ c.date.isoformat() }}">
               <div class="dom">{{ c.day_of_month }}</div>

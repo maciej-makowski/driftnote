@@ -75,6 +75,43 @@ def test_search_invalid_fts_returns_200_with_error(app_with_data: tuple[FastAPI,
     assert "invalid" in r.text.lower()
 
 
+def test_calendar_marks_today_with_entry(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """Today's cell with an entry gets the `today has-entry` state classes."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    # Fixture seeds entry on 2026-05-06 with mood; iso_now is 2026-05-06T12:00:00Z.
+    # Today's cell must have both `today` and `has-entry` classes (in any order).
+    assert re.search(r'<td class="[^"]*\btoday\b[^"]*\bhas-entry\b', r.text) or re.search(
+        r'<td class="[^"]*\bhas-entry\b[^"]*\btoday\b', r.text
+    )
+
+
+def test_calendar_marks_in_month_days_without_entries_as_empty(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """In-month days with no entry that aren't today get the `empty` state class."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    # The fixture only seeds 2026-05-06; every other in-month May day is empty.
+    assert '<td class="empty">' in r.text
+
+
+def test_calendar_marks_today_without_entry_as_today_empty(tmp_path: Path) -> None:
+    """Today with no entry yet gets `today today-empty` (subtle amber bg)."""
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-15T12:00:00Z")
+    install_static(app)
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    assert re.search(r'<td class="[^"]*\btoday\b[^"]*\btoday-empty\b', r.text) or re.search(
+        r'<td class="[^"]*\btoday-empty\b[^"]*\btoday\b', r.text
+    )
+
+
 def test_calendar_page_renders_pad_cell_day_numbers(
     app_with_data: tuple[FastAPI, Engine],
 ) -> None:
