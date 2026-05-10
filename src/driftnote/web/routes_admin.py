@@ -35,6 +35,20 @@ _JOBS = [
 ]
 
 
+def _dot_class_for_status(status: str | None) -> str:
+    """Map a job's last status to a CSS class for the rendered dot.
+
+    Never-run jobs render a neutral green; the "(never)" text disambiguates.
+    """
+    if status == "ok":
+        return "dot-ok"
+    if status == "warn":
+        return "dot-warn"
+    if status == "error":
+        return "dot-error"
+    return "dot-ok"
+
+
 @dataclass(frozen=True)
 class _JobCard:
     job: str
@@ -43,6 +57,7 @@ class _JobCard:
     last_detail: str | None
     last_success_at: str | None
     failures_30d: int
+    dot_class: str
 
 
 def install_admin_routes(
@@ -80,6 +95,7 @@ def install_admin_routes(
                     last_detail=last.detail if last else None,
                     last_success_at=last_ok.started_at if last_ok else None,
                     failures_30d=failures_30d,
+                    dot_class=_dot_class_for_status(last.status if last else None),
                 )
             )
         return cards

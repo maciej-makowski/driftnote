@@ -37,6 +37,21 @@ _MONTH_NAMES = [
     "December",
 ]
 
+# Polished light palette for the email digest. Intentionally not shared with
+# the web UI's dark CSS variables — emails inline their styles and live in
+# light-default inboxes (Gmail, Apple Mail). Visual coherence comes from the
+# shared accent family (purple), not from shared tokens. See
+# docs/superpowers/specs/2026-05-09-issue-4-dark-redesign-design.md.
+_DIGEST_PALETTE: dict[str, str] = {
+    "bg": "#ffffff",
+    "bg_raised": "#f7f6fb",
+    "fg": "#1f1d2b",
+    "fg_muted": "#6c6a78",
+    "fg_dim": "#c4c2cc",
+    "accent": "#6c4fc4",
+    "border": "#e5e4ed",
+}
+
 
 def select_highlights(days: list[DayInput], *, target: int = 4) -> list[HighlightInput]:
     if not days:
@@ -82,6 +97,7 @@ def build_monthly_digest(
     days: list[DayInput],
     web_base_url: str,
 ) -> Digest:
+    p = _DIGEST_PALETTE
     name = _MONTH_NAMES[month]
     subject = f"[Driftnote] {name} {year}"
 
@@ -104,26 +120,33 @@ def build_monthly_digest(
     )
 
     body_html = (
-        f'<html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:auto;padding:16px">\n'
-        f"  <h1>{escape(name)} {year}</h1>\n"
-        f'  <table cellspacing="0" cellpadding="2" style="border-collapse:collapse;margin:8px 0 16px">\n'
+        f'<html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:auto;'
+        f'padding:16px;background:{p["bg"]};color:{p["fg"]}">\n'
+        f'  <h1 style="font-size:24px;font-weight:600;margin:0 0 12px">{escape(name)} {year}</h1>\n'
+        f'  <table cellspacing="0" cellpadding="2" '
+        f'style="border-collapse:collapse;margin:8px 0 16px;background:{p["bg_raised"]}">\n'
         f"    {grid_html}\n"
         f"  </table>\n"
         f"  {stats_html}\n"
         f"  {highlights_html}\n"
-        f'  <p style="margin-top:24px;color:#888"><a href="{escape(web_base_url)}">Open in Driftnote</a></p>\n'
+        f'  <p style="margin-top:24px"><a href="{escape(web_base_url)}" '
+        f'style="color:{p["accent"]};text-decoration:none">Open in Driftnote</a></p>\n'
         f"</body></html>"
     )
     return Digest(subject=subject, html=body_html)
 
 
 def _row_html(row: list[MonthlyCell]) -> str:
+    p = _DIGEST_PALETTE
     return (
         "<tr>"
         + "".join(
-            f'<td style="text-align:center;width:32px;height:32px;'
-            f'color:{"#222" if c.in_month else "#ccc"};font-size:18px">'
-            f"{escape(c.emoji or ('·' if c.in_month else ''))}"
+            f'<td style="text-align:center;width:32px;height:32px;font-size:18px;'
+            f'color:{p["fg"] if c.in_month else p["fg_dim"]}">'
+            f'<div style="font-size:10px;color:{p["fg_muted"] if c.in_month else p["fg_dim"]}">'
+            f"{c.day_of_month}"
+            f"</div>"
+            f"<div>{escape(c.emoji or ('·' if c.in_month else ''))}</div>"
             f"</td>"
             for c in row
         )
@@ -132,15 +155,16 @@ def _row_html(row: list[MonthlyCell]) -> str:
 
 
 def _render_highlight(h: HighlightInput, *, web_base_url: str) -> str:
+    p = _DIGEST_PALETTE
     thumb_html = (
-        f'<img src="{escape(h.photo_thumb)}" style="max-width:100%;border-radius:8px"/>'
-        if h.photo_thumb
-        else ""
+        f'<img src="{escape(h.photo_thumb)}" style="max-width:100%"/>' if h.photo_thumb else ""
     )
     return (
-        f'<section style="margin:16px 0;padding-top:12px;border-top:1px solid #eee">'
-        f'<h3 style="margin:0">'
-        f'<a href="{escape(web_base_url)}/entry/{escape(h.date.isoformat())}" style="color:#222;text-decoration:none">'
+        f'<section style="margin:16px 0;padding:12px 0 0 16px;'
+        f'border-top:1px solid {p["border"]};border-left:4px solid {p["accent"]}">'
+        f'<h3 style="margin:0;font-size:16px">'
+        f'<a href="{escape(web_base_url)}/entry/{escape(h.date.isoformat())}" '
+        f'style="color:{p["fg"]};text-decoration:none">'
         f'{escape(h.date.isoformat())} <span style="font-size:20px">{escape(h.mood or "")}</span>'
         f"</a></h3>"
         f"{h.summary_html}"

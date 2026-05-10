@@ -2,12 +2,12 @@
 {% block title %}Search — Driftnote{% endblock %}
 {% block content %}
 <h1>Search</h1>
-<form method="get" action="/search">
+<form method="get" action="/search" class="search-form">
   <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" autofocus>
   <button>Search</button>
 </form>
 {% if error %}
-  <p class="banner-warn" style="padding:8px;border-radius:4px">{{ error }}</p>
+  <p class="banner banner-warn">{{ error }}</p>
 {% endif %}
 <ul class="search-results">
   {% for e in results %}

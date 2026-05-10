@@ -3,14 +3,21 @@
 {% block content %}
 <form method="post" action="/entry/{{ entry.date }}" class="entry-edit">
   <h1>Edit {{ entry.date }}</h1>
-  <label>Mood (one emoji): <input name="mood" value="{{ entry.mood or '' }}"></label>
-  <label>Tags (comma-separated): <input name="tags" value="{{ tags_csv }}" style="width:100%"></label>
-  <label>Body (markdown):</label>
-  <textarea name="body" rows="14"
-            hx-post="/preview" hx-target="#preview" hx-trigger="keyup changed delay:400ms"
-            style="width:100%">{{ entry.body_md }}</textarea>
-  <h3>Preview</h3>
+  <label>Mood (one emoji)
+    <input name="mood" value="{{ entry.mood or '' }}">
+  </label>
+  <label>Tags (comma-separated)
+    <input name="tags" value="{{ tags_csv }}">
+  </label>
+  <label>Body (markdown)
+    <textarea name="body" rows="14"
+              hx-post="/preview" hx-target="#preview" hx-trigger="keyup changed delay:400ms">{{ entry.body_md }}</textarea>
+  </label>
+  <h2>Preview</h2>
   <div id="preview" class="preview">{{ initial_preview|safe }}</div>
-  <p><button type="submit">Save</button> <a href="/entry/{{ entry.date }}">Cancel</a></p>
+  <p>
+    <button type="submit">Save</button>
+    <a href="/entry/{{ entry.date }}">Cancel</a>
+  </p>
 </form>
 {% endblock %}
