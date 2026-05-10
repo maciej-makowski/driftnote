@@ -148,3 +148,18 @@ def tags_by_date_in_range(session: Session, start: str, end: str) -> dict[str, l
     for t in session.scalars(stmt):
         out.setdefault(t.date, []).append(t.tag)
     return out
+
+
+def tags_for_dates(session: Session, dates: list[str]) -> dict[str, list[str]]:
+    """Return tag lists keyed by date, for each date in `dates`.
+
+    Dates with no tags (or no entry at all) are absent from the result.
+    Empty input short-circuits to {} without a DB query.
+    """
+    if not dates:
+        return {}
+    stmt = select(Tag).where(Tag.date.in_(dates)).order_by(Tag.date, Tag.tag)
+    out: dict[str, list[str]] = {}
+    for tag in session.scalars(stmt):
+        out.setdefault(tag.date, []).append(tag.tag)
+    return out
