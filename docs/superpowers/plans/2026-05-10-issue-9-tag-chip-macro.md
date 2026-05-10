@@ -523,7 +523,7 @@ git commit -m "style(web): consolidate tag chip styling into single .tag-chip ru
 uv run pytest -q -m "not live and not slow"
 ```
 
-Expected: all green. Test count delta from master baseline: +4 unit (`tags_for_dates` × 3 + maybe `_record` shared helper — actually 3 new unit tests) and +1 integration (`test_search_results_render_tag_chips_per_hit`).
+Expected: all green. Test count delta from master baseline: +3 unit (`tags_for_dates` × 3) and +1 integration (`test_search_results_render_tag_chips_per_hit`).
 
 ### Task 5.2: Push + open PR
 
@@ -541,10 +541,10 @@ gh pr create --title "feat(web): tag_chip macro + tag chips on search results (#
 
 Closes #9.
 
-- New \`tag_chip(tag, count=none, size_rem=none)\` Jinja macro in \`src/driftnote/web/templates/_macros.html.j2\` — single source of truth for rendering \`#tag\` as a chip-link.
-- Three call sites adopt it: entry detail, tags page (passes \`count\` + dynamic \`size_rem\` for the cloud), search results (new — previously bare).
-- New \`tags_for_dates(session, dates)\` repository helper enables the search route to enrich result rows with their tags in one query (no N+1).
-- CSS consolidation: \`.entry .tags a\` and \`.tag-cloud a\` rules merged into a single \`.tag-chip\` rule.
+- New `tag_chip(tag, count=none, size_rem=none)` Jinja macro in `src/driftnote/web/templates/_macros.html.j2` — single source of truth for rendering `#tag` as a chip-link.
+- Three call sites adopt it: entry detail, tags page (passes `count` + dynamic `size_rem` for the cloud), search results (new — previously bare).
+- New `tags_for_dates(session, dates)` repository helper enables the search route to enrich result rows with their tags in one query (no N+1).
+- CSS consolidation: `.entry .tags a` and `.tag-cloud a` rules merged into a single `.tag-chip` rule.
 
 ## Out of scope (decided in brainstorming)
 
@@ -554,15 +554,15 @@ Closes #9.
 
 ## Test plan
 
-- [x] 3 unit tests for \`tags_for_dates\`: empty input, multi-date dict shape, dates-without-tags omitted
-- [x] 1 integration test asserts search-result rows render \`class=\"tag-chip\"\` chips with correct \`/?tag=<tag>\` hrefs
+- [x] 3 unit tests for `tags_for_dates`: empty input, multi-date dict shape, dates-without-tags omitted
+- [x] 1 integration test asserts search-result rows render `class="tag-chip"` chips with correct `/?tag=<tag>` hrefs
 - [x] Existing entry-detail and tags-page integration tests pass unchanged (macro markup is equivalent)
-- [x] Stylesheet audit clean: 1 \`border-radius\` (status dot), no box-shadow/gradient, no raw hex outside \`:root\`
+- [x] Stylesheet audit clean: 1 `border-radius` (status dot), no box-shadow/gradient, no raw hex outside `:root`
 
 ## Spec + plan
 
-- Spec: \`docs/superpowers/specs/2026-05-10-issue-9-tag-chip-macro-design.md\`
-- Plan: \`docs/superpowers/plans/2026-05-10-issue-9-tag-chip-macro.md\`
+- Spec: `docs/superpowers/specs/2026-05-10-issue-9-tag-chip-macro-design.md`
+- Plan: `docs/superpowers/plans/2026-05-10-issue-9-tag-chip-macro.md`
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
