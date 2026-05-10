@@ -17,6 +17,55 @@ uv run uvicorn --factory driftnote.app:create_app --reload
 
 Open http://localhost:8000/ — empty calendar; smoke-test by sending an email through the GreenMail container.
 
+## Local development
+
+Driftnote reads its config and SQLite/media data root from a single home
+directory. By convention this is `~/.driftnote/`, but you can override
+it with the `DRIFTNOTE_HOME` environment variable.
+
+A typical local setup:
+
+```
+~/.driftnote/
+├── config.toml          # see deploy/README.md §3 for the canonical template
+├── .env                 # secrets + per-machine overrides
+├── data/                # SQLite + entries/ + raw/ + backups/
+└── ...
+```
+
+The `.env` is auto-loaded at startup (CLI subcommands and the FastAPI app
+both call the same loader). Existing environment variables always win,
+so production systemd quadlets and CI runs are unaffected.
+
+A minimal `.env` for local development:
+
+```ini
+DRIFTNOTE_GMAIL_USER=tester@example.com
+DRIFTNOTE_GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+DRIFTNOTE_ENVIRONMENT=dev
+DRIFTNOTE_WEB_BASE_URL=http://localhost:8000
+```
+
+With those two files in place, you can run any CLI command without
+exporting anything in the shell:
+
+```bash
+uv run driftnote serve
+uv run driftnote send-prompt
+```
+
+To use a custom location:
+
+```bash
+export DRIFTNOTE_HOME=/path/to/your/driftnote
+uv run driftnote serve
+```
+
+Override individual paths if needed: `DRIFTNOTE_CONFIG` (defaults to
+`$DRIFTNOTE_HOME/config.toml`) and `DRIFTNOTE_DATA_ROOT` (defaults to
+`$DRIFTNOTE_HOME/data`) still take precedence over the home-derived
+defaults.
+
 ## CLI
 
 ```bash
