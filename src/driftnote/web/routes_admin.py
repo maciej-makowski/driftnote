@@ -103,7 +103,7 @@ def install_admin_routes(
     @app.get("/admin", response_class=HTMLResponse)
     async def admin_index(request: Request, notice: str | None = None) -> HTMLResponse:
         now = iso_now()
-        return templates.TemplateResponse(
+        rendered = templates.TemplateResponse(
             request,
             "admin.html.j2",
             {
@@ -113,13 +113,17 @@ def install_admin_routes(
                 "notice": notice,
             },
         )
+        # Admin job-status cards reflect DB state that mutates as jobs run;
+        # keep the browser from serving a stale snapshot (see #23).
+        rendered.headers["Cache-Control"] = "no-store"
+        return rendered
 
     @app.get("/admin/runs/{job}", response_class=HTMLResponse)
     async def admin_drill(request: Request, job: str) -> HTMLResponse:
         now = iso_now()
         with session_scope(engine) as session:
             rows = recent_runs_for_job(session, job, limit=100)
-        return templates.TemplateResponse(
+        rendered = templates.TemplateResponse(
             request,
             "admin.html.j2",
             {
@@ -130,6 +134,8 @@ def install_admin_routes(
                 "dev_mode": environment == "dev",
             },
         )
+        rendered.headers["Cache-Control"] = "no-store"
+        return rendered
 
     @app.post("/admin/runs/{run_id}/ack")
     async def admin_ack(run_id: int) -> RedirectResponse:
