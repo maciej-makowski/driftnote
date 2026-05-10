@@ -175,16 +175,25 @@ def test_load_env_unreadable_dotenv_does_not_raise(
 ) -> None:
     """A `.env` file we cannot read is silently skipped; defaults still apply.
 
-    Provoke a read error by creating a directory at the path where load_env()
-    expects a regular file. python-dotenv's load_dotenv() returns False on
-    such conditions rather than raising.
+    `python-dotenv.load_dotenv()` returns False for missing/directory paths
+    but raises `PermissionError` for a regular file with mode 0o000. Our
+    contract is to swallow that. Test by writing a real .env, chmod'ing it
+    to 0o000, and checking load_env() returns normally.
     """
-    (tmp_path / ".env").mkdir()  # directory, not a file — read-as-file fails
+    if os.geteuid() == 0:
+        pytest.skip("running as root bypasses POSIX file mode")
+    env_file = tmp_path / ".env"
+    env_file.write_text("DRIFTNOTE_TESTKEY_UNREADABLE=should_not_load\n")
+    env_file.chmod(0o000)
     monkeypatch.setenv("DRIFTNOTE_HOME", str(tmp_path))
+    monkeypatch.delenv("DRIFTNOTE_TESTKEY_UNREADABLE", raising=False)
     monkeypatch.delenv("DRIFTNOTE_CONFIG", raising=False)
+    try:
+        load_env()  # must not raise
+    finally:
+        env_file.chmod(0o644)  # restore so pytest can clean up tmp_path
 
-    load_env()  # must not raise
-
+    assert "DRIFTNOTE_TESTKEY_UNREADABLE" not in os.environ
     assert os.environ["DRIFTNOTE_CONFIG"] == str(tmp_path / "config.toml")
 ```
 
@@ -212,6 +221,7 @@ Idempotent: safe to call multiple times. Existing env vars always win.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -229,13 +239,16 @@ def load_env() -> None:
     """Load $DRIFTNOTE_HOME/.env and set defaults for derived env paths."""
     home = driftnote_home()
     env_file = home / ".env"
-    if env_file.is_file():
+    # python-dotenv returns False for missing/directory paths but RAISES
+    # PermissionError for an unreadable regular file. Swallow that — our
+    # contract is "silently skip an unreadable .env; defaults still apply".
+    with contextlib.suppress(OSError):
         load_dotenv(env_file, override=False)
     os.environ.setdefault("DRIFTNOTE_CONFIG", str(home / "config.toml"))
     os.environ.setdefault("DRIFTNOTE_DATA_ROOT", str(home / "data"))
 ```
 
-Note the use of `env_file.is_file()` rather than `env_file.exists()` — that gates the directory-as-`.env` edge case (the unreadable test) without relying on `python-dotenv`'s behaviour. The function still doesn't raise; it just doesn't try to load.
+The `contextlib.suppress(OSError)` is load-bearing — `python-dotenv` raises `PermissionError` when the file exists but is unreadable (verified empirically against `python-dotenv` 1.x). Missing files and directories at the path return `False` from `load_dotenv()` without raising, so the suppress block also covers those gracefully. No `is_file()` gate needed.
 
 - [ ] **Step 4: Run the tests and confirm they pass**
 
@@ -330,7 +343,7 @@ def test_cli_callback_loads_dotenv_before_subcommand(
     assert os.environ["DRIFTNOTE_TESTKEY_CLI"] == "from_cli_dotenv"
 ```
 
-Note: `os` and `Path` are already imported at the top of this file. `cli_app`, `CliRunner`, and `runner` fixture are already in scope. Add nothing else.
+Note: `Path`, `pytest`, `cli_app`, `CliRunner`, and the `runner` fixture are already in scope. The file does NOT currently import `os` — add `import os` to the imports block at the top of the file (alphabetically, between `imaplib` and `from datetime`).
 
 - [ ] **Step 2: Run the test and confirm it fails**
 
@@ -357,9 +370,23 @@ def _bootstrap() -> None:
     load_env()
 ```
 
-Typer fires `@app.callback()` exactly once per CLI invocation, before any subcommand body executes.
+Typer fires `@app.callback()` exactly once per CLI invocation, before any subcommand body executes — including for `--help`. This is what the new test relies on.
 
-- [ ] **Step 4: Run the new test, confirm it passes**
+- [ ] **Step 4: Make the existing `--help` test hermetic**
+
+The pre-existing `test_poll_responses_help_lists_command` (around line 149 in `tests/integration/test_cli.py`) calls `runner.invoke(cli_app, ["--help"])` without setting `DRIFTNOTE_HOME`. After this change, that invocation fires `load_env()`, which mutates the process's `os.environ` based on whatever `~/.driftnote/` exists on the host and persists into subsequent tests.
+
+Make it hermetic: change the test signature from `runner: CliRunner` to `tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch`, and at the top of the body add:
+
+```python
+monkeypatch.setenv("DRIFTNOTE_HOME", str(tmp_path))
+monkeypatch.delenv("DRIFTNOTE_CONFIG", raising=False)
+monkeypatch.delenv("DRIFTNOTE_DATA_ROOT", raising=False)
+```
+
+This pins `load_env()`'s effect to the tmp dir for the duration of the test; `monkeypatch.delenv` ensures `setdefault` writes the tmp-derived values, and pytest restores the original env after the test. Other tests in the file already follow this pattern.
+
+- [ ] **Step 5: Run the new test, confirm it passes**
 
 ```bash
 uv run pytest tests/integration/test_cli.py::test_cli_callback_loads_dotenv_before_subcommand -v
@@ -367,15 +394,15 @@ uv run pytest tests/integration/test_cli.py::test_cli_callback_loads_dotenv_befo
 
 Expected: pass.
 
-- [ ] **Step 5: Run the full CLI integration suite**
+- [ ] **Step 6: Run the full CLI integration suite**
 
 ```bash
 uv run pytest tests/integration/test_cli.py -v
 ```
 
-Expected: green. Existing tests use `monkeypatch.setenv` before `runner.invoke`, so `load_env()`'s `setdefault` is a no-op — no behavioural change.
+Expected: green. Existing env-touching tests use `monkeypatch.setenv` before `runner.invoke`, so `load_env()`'s `setdefault` is a no-op for those keys — no behavioural change. The hermetic update to `test_poll_responses_help_lists_command` keeps it deterministic across pytest's test ordering.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/driftnote/app.py src/driftnote/cli.py tests/integration/test_cli.py
@@ -401,9 +428,11 @@ The README has setup, run, and architecture sections. Add the new "Local develop
 
 - [ ] **Step 2: Append the section**
 
-Insert this content (adjust the heading level to match the existing README — if existing top-level sections use `##`, use `##`; match the convention):
+Insert the content below into `README.md` at the chosen insertion point. The plan wraps the content in a four-backtick outer fence so the inner three-backtick fences render correctly here; **do not** paste the outer four-backtick fence into the README — only the content between them.
 
-```markdown
+Match the heading level to the surrounding README (use `##` if existing top-level sections use `##`).
+
+````markdown
 ## Local development
 
 Driftnote reads its config and SQLite/media data root from a single home
@@ -452,9 +481,7 @@ Override individual paths if needed: `DRIFTNOTE_CONFIG` (defaults to
 `$DRIFTNOTE_HOME/config.toml`) and `DRIFTNOTE_DATA_ROOT` (defaults to
 `$DRIFTNOTE_HOME/data`) still take precedence over the home-derived
 defaults.
-```
-
-(Match the existing fenced-code-block style in the README — some projects use 4 backticks for nested examples; check the file before pasting.)
+````
 
 - [ ] **Step 3: Commit**
 
@@ -481,10 +508,15 @@ Expected: all green. The new tests bring the total up by 10 (9 unit + 1 integrat
 
 - [ ] **Step 1: Verify `DRIFTNOTE_HOME` default works**
 
+Make sure no leftover env state contaminates the smoke test:
+
+```bash
+unset DRIFTNOTE_HOME DRIFTNOTE_CONFIG DRIFTNOTE_DATA_ROOT
+```
+
 If you have a real `~/.driftnote/{config.toml,.env}` already (which you should — this branch is built on the prod install spec):
 
 ```bash
-unset DRIFTNOTE_CONFIG DRIFTNOTE_DATA_ROOT
 uv run driftnote --help
 ```
 
@@ -493,9 +525,10 @@ Expected: `--help` output renders, no `KeyError`, no traceback.
 If you don't have `~/.driftnote/`, point at a tmp:
 
 ```bash
-mkdir /tmp/driftnote-smoke
-echo 'DRIFTNOTE_GMAIL_USER=smoke@example.com' > /tmp/driftnote-smoke/.env
-DRIFTNOTE_HOME=/tmp/driftnote-smoke uv run driftnote --help
+SMOKE_DIR=$(mktemp -d)
+echo 'DRIFTNOTE_GMAIL_USER=smoke@example.com' > "$SMOKE_DIR/.env"
+DRIFTNOTE_HOME="$SMOKE_DIR" uv run driftnote --help
+rm -rf "$SMOKE_DIR"
 ```
 
 Expected: same.
