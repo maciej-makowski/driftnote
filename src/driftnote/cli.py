@@ -11,12 +11,19 @@ from pathlib import Path
 
 import typer
 
+from driftnote.bootstrap import load_env
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.filesystem.markdown_io import read_entry
 from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
 from driftnote.repository.media import MediaInput, replace_media
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Driftnote CLI")
+
+
+@app.callback()
+def _bootstrap() -> None:
+    """Load DRIFTNOTE_HOME/.env before any subcommand runs."""
+    load_env()
 
 
 def _data_root() -> Path:
