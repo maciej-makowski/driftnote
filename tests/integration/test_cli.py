@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import imaplib
+import os
 from datetime import date as _date
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -146,8 +147,13 @@ def _write_min_config(path: Path) -> None:
     )
 
 
-def test_poll_responses_help_lists_command(runner: CliRunner) -> None:
+def test_poll_responses_help_lists_command(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Sanity: the new CLI command is registered and shows up in --help."""
+    monkeypatch.setenv("DRIFTNOTE_HOME", str(tmp_path))
+    monkeypatch.delenv("DRIFTNOTE_CONFIG", raising=False)
+    monkeypatch.delenv("DRIFTNOTE_DATA_ROOT", raising=False)
     result = runner.invoke(cli_app, ["--help"])
     assert result.exit_code == 0, result.output
     assert "poll-responses" in result.output
@@ -300,3 +306,24 @@ def test_send_prompt_renders_full_template_body(
     assert "— Driftnote" in body_text  # em-dash + Driftnote signature
     # And the date placeholder substituted correctly.
     assert "How was 2026-05-09?" in body_text
+
+
+def test_cli_callback_loads_dotenv_before_subcommand(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Typer callback runs `load_env()` before any subcommand fires.
+
+    With DRIFTNOTE_HOME pointing at a tmp dir containing a .env, invoking
+    a subcommand (here `reindex --help`) is enough to trigger the parent
+    group's callback and populate any env vars the .env declares. (The
+    root-level `--help` short-circuits via Click's eager handler before
+    the callback body runs, so we exercise a subcommand instead.)
+    """
+    (tmp_path / ".env").write_text("DRIFTNOTE_TESTKEY_CLI=from_cli_dotenv\n")
+    monkeypatch.setenv("DRIFTNOTE_HOME", str(tmp_path))
+    monkeypatch.delenv("DRIFTNOTE_TESTKEY_CLI", raising=False)
+
+    result = runner.invoke(cli_app, ["reindex", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["DRIFTNOTE_TESTKEY_CLI"] == "from_cli_dotenv"

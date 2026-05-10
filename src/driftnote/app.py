@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from driftnote.alerts import AlertSender
+from driftnote.bootstrap import load_env
 from driftnote.config import Config, load_config
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.logging import configure_logging
@@ -49,6 +50,9 @@ class _SmtpAlertSender:
 
 def create_app(*, skip_startup_jobs: bool = False) -> FastAPI:
     """Compose the full app. `skip_startup_jobs=True` is for tests."""
+    # Idempotent with the Typer @app.callback() in cli.py; ensures a
+    # direct Python-level create_app() call still bootstraps env.
+    load_env()
     configure_logging(
         level="INFO",
         json_output=os.environ.get("DRIFTNOTE_ENVIRONMENT", "prod") != "dev",
