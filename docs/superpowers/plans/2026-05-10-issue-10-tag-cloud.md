@@ -58,15 +58,18 @@ def test_layout_cloud_empty_input_returns_empty_list() -> None:
 
 
 def test_layout_cloud_largest_tag_lands_near_center() -> None:
-    """Centerpiece (step=0, r=0) is placed with bbox-center at canvas-center."""
+    """Centerpiece (step=0, r=0) is placed with bbox-center at canvas-center.
+
+    With r=0 the placement is exact modulo int truncation, so within 1 px.
+    """
     cloud = layout_cloud({"work": 50, "rest": 5}, width=600, height=400)
     largest = next(t for t in cloud if t.name == "work")
     assert largest.placed
     cx, cy = 300, 200
     bbox_w = int(largest.font_size * 0.6 * (len("work") + 1))
     bbox_h = int(largest.font_size * 1.2)
-    assert abs(largest.x + bbox_w // 2 - cx) <= 5
-    assert abs(largest.y + bbox_h // 2 - cy) <= 5
+    assert abs(largest.x + bbox_w // 2 - cx) <= 1
+    assert abs(largest.y + bbox_h // 2 - cy) <= 1
 
 
 def test_layout_cloud_placements_do_not_overlap() -> None:
@@ -287,7 +290,7 @@ git commit -m "feat(web): add layout_cloud — server-side spiral tag-cloud layo
 
 Open `src/driftnote/web/routes_browse.py`. The existing import block runs from line 3 to roughly line 30. Add:
 
-1. `import structlog` near the top of the third-party imports (between `from sqlalchemy.exc import OperationalError` and the first `from driftnote...` import).
+1. `import structlog` as a new line in the third-party group, immediately after the existing `from sqlalchemy.exc import OperationalError` line (or wherever ruff prefers — the formatter will normalise on commit).
 2. `from driftnote.web.cloud import DEFAULT_HEIGHT, DEFAULT_WIDTH, layout_cloud` after the existing `from driftnote.web.banners import compute_banners` import (alphabetical within the `driftnote.web` group).
 
 Then immediately after the imports block, before `_TEMPLATES_DIR = ...`, add:
@@ -515,7 +518,28 @@ uv run pytest -q -m "not live and not slow"
 
 Expected: all green. Test count delta from master baseline: +7 unit (`test_web_cloud.py`) and 0 integration (existing test extended in place).
 
-### Task 4.2: Push + open PR
+### Task 4.2: Manual visual sanity check
+
+Layout-heavy changes deserve eyes on the rendered page. Quick check before opening the PR:
+
+- [ ] **Step 1: Run the dev server**
+
+```bash
+unset DRIFTNOTE_HOME DRIFTNOTE_CONFIG DRIFTNOTE_DATA_ROOT  # clean env
+DRIFTNOTE_HOME=$HOME/.driftnote uv run driftnote serve
+```
+
+(If your `~/.driftnote` doesn't have data, point at any directory containing a `config.toml` and `.env`.)
+
+- [ ] **Step 2: Open `/tags` at desktop width and 360 px**
+
+Visit `http://localhost:8000/tags` in a browser:
+- Desktop (≥601 px): a 600×400 area with the cloud canvas; chips are absolutely positioned, no overlaps, largest tag near center.
+- Mobile (≤600 px): the canvas is hidden; the flat font-scaled list shows.
+
+If the layout looks broken (chips overlap, largest tag isn't central, mobile fallback doesn't show), STOP and re-investigate — likely a bbox-estimation drift or a CSS specificity issue.
+
+### Task 4.3: Push + open PR
 
 - [ ] **Step 1: Push the branch**
 
