@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC
-from typing import Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session
 
 from driftnote.models import JobRun
@@ -81,6 +81,29 @@ def finish_job_run(
 
 def acknowledge_run(session: Session, *, run_id: int, at: str) -> None:
     session.execute(update(JobRun).where(JobRun.id == run_id).values(acknowledged_at=at))
+
+
+def acknowledge_all_for_job(session: Session, *, job: str, now: str) -> int:
+    """Bulk-acknowledge every unacked error/warn row for `job` started by `now`.
+
+    Returns the number of rows updated. Already-acknowledged rows and rows that
+    started after `now` are not touched, which keeps "ack all" idempotent and
+    safe against runs that begin between the user's click and the request.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(JobRun)
+            .where(
+                JobRun.job == job,
+                JobRun.status.in_(["error", "warn"]),
+                JobRun.acknowledged_at.is_(None),
+                JobRun.started_at <= now,
+            )
+            .values(acknowledged_at=now)
+        ),
+    )
+    return result.rowcount or 0
 
 
 def last_run(session: Session, job: str) -> JobRunRecord | None:
