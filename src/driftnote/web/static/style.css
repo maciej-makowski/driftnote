@@ -86,8 +86,27 @@ a:hover { color: var(--accent-hover); }
 .calendar .emoji { font-size: 20px; }
 .calendar .dom { font-size: 11px; color: var(--fg-muted); }
 
-/* Tag cloud */
+/* Tag cloud canvas (desktop): absolutely-positioned chips on a 600x400 area */
+.tag-cloud-canvas {
+  position: relative;
+  margin: 16px auto;
+  background: var(--bg-raised);
+}
+.tag-cloud-canvas .cloud-chip {
+  position: absolute;
+  white-space: nowrap;
+  margin-right: 0;  /* override .tag-chip default */
+}
+
+/* Flat tag list — used as the mobile fallback */
 .tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (max-width: 600px) {
+  .tag-cloud-canvas { display: none; }
+}
+@media (min-width: 601px) {
+  .tag-cloud { display: none; }
+}
 
 /* Tag chips (entry view, tags cloud, search results) */
 .tag-chip {
