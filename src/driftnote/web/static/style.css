@@ -77,7 +77,7 @@ a:hover { color: var(--accent-hover); }
 }
 .calendar th { color: var(--fg-muted); font-weight: 500; font-size: 13px; }
 .calendar td a { color: var(--fg); display: block; }
-.calendar td.dim { color: var(--fg-dim); }
+.calendar td.dim { opacity: 0.5; }
 .calendar td.empty       { background: var(--bg-raised); }
 .calendar td.has-entry   { background: var(--cal-entry); }
 .calendar td.today-empty { background: var(--cal-today-empty); }
@@ -85,7 +85,6 @@ a:hover { color: var(--accent-hover); }
 .calendar td:hover { background: var(--bg-hover); }
 .calendar .emoji { font-size: 20px; }
 .calendar .dom { font-size: 11px; color: var(--fg-muted); }
-.calendar td.dim .dom { color: var(--fg-dim); }
 
 /* Tag cloud */
 .tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }

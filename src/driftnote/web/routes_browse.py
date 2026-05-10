@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar as _cal
 from collections.abc import Callable
 from datetime import date as _date
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -19,8 +20,8 @@ from driftnote.digest.moodboard import monthly_moodboard_grid
 from driftnote.repository.entries import (
     EntryRecord,
     get_entry,
-    list_entries_by_month,
     list_entries_by_tag,
+    list_entries_in_range,
     list_tags_for_date,
     search_fts,
     tag_frequencies_in_range,
@@ -61,8 +62,13 @@ def install_browse_routes(
         today = _date.today()
         y = year or today.year
         m = month or today.month
+        # Query the full 6-week calendar window (which can leak into the
+        # prev/next month) so pad cells render their mood emoji too.
+        first = _date(y, m, 1)
+        grid_start = first - timedelta(days=first.weekday())
+        grid_end = grid_start + timedelta(days=41)
         with session_scope(engine) as session:
-            entries = list_entries_by_month(session, y, m)
+            entries = list_entries_in_range(session, grid_start.isoformat(), grid_end.isoformat())
         days = [
             DayInput(
                 date=_date.fromisoformat(e.date),

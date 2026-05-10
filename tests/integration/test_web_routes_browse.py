@@ -122,19 +122,57 @@ def test_calendar_page_renders_pad_cell_day_numbers(
     assert r.status_code == 200
     # Six body rows of seven cells each, plus one header row.
     assert r.text.count("<tr>") == 7
-    # Pad cells live inside <td class="dim"> with a <div class="dom"> day
-    # number. Extract every pad-cell day number to verify the prev-month
-    # tail (Apr 27..30) is rendered — these days do not collide with any
-    # in-month May date and so prove the {% else %} branch of the template
-    # actually runs.
+    # Pad cells get a `dim` class plus a state class. Day-of-month sits in
+    # a <div class="dom"> just like in-month cells.
     pad_doms = re.findall(
-        r'<td class="dim">\s*<div class="dom">(\d+)</div>',
+        r'<td class="dim[^"]*">\s*<a href="/entry/[^"]+">\s*<div class="dom">(\d+)</div>',
         r.text,
     )
     assert "27" in pad_doms
     assert "28" in pad_doms
     assert "29" in pad_doms
     assert "30" in pad_doms
+
+
+def test_calendar_pad_cells_carry_state_classes(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """Pad cells get the same `empty`/`has-entry` state classes as in-month
+    cells, so prev/next-month days render with the same subtle backgrounds."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    # Fixture only seeds 2026-05-06, so every pad cell (April + June) is empty.
+    assert re.search(r'<td class="dim empty">', r.text)
+
+
+def test_calendar_pad_cell_with_entry_renders_mood(tmp_path: Path) -> None:
+    """An entry on the prev-month tail (e.g. Apr 30) shows its mood emoji and
+    `has-entry` state class when viewing the next month's grid."""
+    eng = make_engine(tmp_path / "index.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-04-30",
+                mood="🌧️",
+                body_text="april rain",
+                body_md="rain",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    install_static(app)
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    # The April 30 pad cell must carry the has-entry state and the mood emoji.
+    assert re.search(
+        r'<td class="dim has-entry">\s*<a href="/entry/2026-04-30">\s*<div class="dom">30</div>\s*<div class="emoji">🌧️</div>',
+        r.text,
+    )
 
 
 def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:

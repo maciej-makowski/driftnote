@@ -14,24 +14,19 @@
     {% for row in cells %}
       <tr>
       {% for c in row %}
+        {%- set state = "has-entry" if c.emoji else "empty" -%}
         {%- if not c.in_month -%}
-          {%- set td_class = "dim" -%}
+          {%- set td_class = "dim " ~ state -%}
         {%- elif c.date.isoformat() == today_iso -%}
-          {%- set td_class = "today has-entry" if c.emoji else "today today-empty" -%}
-        {%- elif c.emoji -%}
-          {%- set td_class = "has-entry" -%}
+          {%- set td_class = "today " ~ ("has-entry" if c.emoji else "today-empty") -%}
         {%- else -%}
-          {%- set td_class = "empty" -%}
+          {%- set td_class = state -%}
         {%- endif %}
         <td class="{{ td_class }}">
-          {% if c.in_month %}
-            <a href="/entry/{{ c.date.isoformat() }}">
-              <div class="dom">{{ c.day_of_month }}</div>
-              <div class="emoji">{{ c.emoji or "·" }}</div>
-            </a>
-          {% else %}
+          <a href="/entry/{{ c.date.isoformat() }}">
             <div class="dom">{{ c.day_of_month }}</div>
-          {% endif %}
+            <div class="emoji">{{ c.emoji or "·" }}</div>
+          </a>
         </td>
       {% endfor %}
       </tr>

@@ -48,7 +48,9 @@ def monthly_moodboard_grid(
     """Calendar grid: rows = weeks, columns = Mon..Sun. Always returns six
     rows for stable visual rhythm. Cells outside the target month carry
     `in_month=False` but still expose the prev/next-month day number for
-    rendering as dimmed pad cells."""
+    rendering as dimmed pad cells. Pad cells receive their emoji from the
+    `days` list like any other cell — callers that want emoji-less pad
+    cells (e.g. the email digest) simply pass only in-month days."""
     by_date = {d.date: d.mood for d in days}
 
     first = date(year, month, 1)
@@ -66,7 +68,7 @@ def monthly_moodboard_grid(
                     date=cur,
                     in_month=in_month,
                     day_of_month=cur.day,
-                    emoji=by_date.get(cur) if in_month else None,
+                    emoji=by_date.get(cur),
                 )
             )
             cur += timedelta(days=1)
