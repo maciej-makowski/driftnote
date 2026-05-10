@@ -32,11 +32,11 @@ Render `#tag` consistently as a chip-link everywhere it appears, and surface tag
 
 Three callers:
 
-- `entry.html.j2` — `{{ m.tag_chip(t) }}` per tag in the existing `<p class="tags">` block.
-- `tags.html.j2` — `{{ m.tag_chip(tag, count=count, size_rem=0.8 + count*0.1) }}`. The dynamic per-tag font-size (frequency-based cloud sizing) is the canonical legitimate use of inline `style=`; the macro encapsulates it.
-- `search.html.j2` — `{{ m.tag_chip(t) }}` per tag, after the result's date/mood line.
+- `entry.html.j2` — `{{ tag_chip(t) }}` per tag in the existing `<p class="tags">` block.
+- `tags.html.j2` — `{{ tag_chip(tag, count=count, size_rem=0.8 + count*0.1) }}`. The dynamic per-tag font-size (frequency-based cloud sizing) is the canonical legitimate use of inline `style=`; the macro encapsulates it.
+- `search.html.j2` — `{{ tag_chip(t) }}` per tag, after the result's date/mood line.
 
-Imported with `{% from "_macros.html.j2" import tag_chip as m %}` at the top of each calling template (or `{% from "_macros.html.j2" import tag_chip %}` if the bare name reads better — implementer's call).
+Imported with `{% from "_macros.html.j2" import tag_chip %}` at the top of each calling template (bare name; reads cleanly for a single-symbol import; standardised across all three templates).
 
 ## Repository helper
 
@@ -48,14 +48,14 @@ def tags_for_dates(session: Session, dates: list[str]) -> dict[str, list[str]]:
     are absent from the result. Single SQL query — no N+1."""
     if not dates:
         return {}
-    stmt = select(Tag.date, Tag.tag).where(Tag.date.in_(dates)).order_by(Tag.date, Tag.tag)
+    stmt = select(Tag).where(Tag.date.in_(dates)).order_by(Tag.date, Tag.tag)
     out: dict[str, list[str]] = {}
-    for d, t in session.execute(stmt).all():
-        out.setdefault(d, []).append(t)
+    for tag in session.scalars(stmt):
+        out.setdefault(tag.date, []).append(tag.tag)
     return out
 ```
 
-Naming aligns with the existing `tags_by_date_in_range` (which takes a range, not a list of dates) — different shape, separate helper.
+Naming aligns with the existing `tags_by_date_in_range` (which takes a range, not a list of dates) — different shape, separate helper. Style matches: `select(Tag)` + `session.scalars(...)` + iterate ORM instances, mirroring the surrounding code.
 
 ## Search route change
 
