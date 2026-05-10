@@ -3,6 +3,15 @@
 {% block title %}Tags — Driftnote{% endblock %}
 {% block content %}
 <h1>Tags</h1>
+{% if cloud %}
+<div class="tag-cloud-canvas" style="width:{{ canvas_width }}px;height:{{ canvas_height }}px">
+  {% for t in cloud %}
+    {% if t.placed %}
+      <a href="/?tag={{ t.name }}" class="tag-chip cloud-chip" style="left:{{ t.x }}px;top:{{ t.y }}px;font-size:{{ t.font_size }}px">#{{ t.name }}</a>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
 <ul class="tag-cloud">
   {% for tag, count in tags %}
     <li>{{ tag_chip(tag, count=count, size_rem=0.8 + count * 0.1) }}</li>

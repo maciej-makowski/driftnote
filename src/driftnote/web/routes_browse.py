@@ -8,6 +8,7 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
+import structlog
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -29,6 +30,9 @@ from driftnote.repository.entries import (
 )
 from driftnote.repository.media import list_media
 from driftnote.web.banners import compute_banners
+from driftnote.web.cloud import DEFAULT_HEIGHT, DEFAULT_WIDTH, layout_cloud
+
+log = structlog.get_logger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 # Pages rendering DB-derived state must not be cached by the browser, otherwise
@@ -141,8 +145,23 @@ def install_browse_routes(
     async def tags_view(request: Request) -> HTMLResponse:
         with session_scope(engine) as session:
             freq = tag_frequencies_in_range(session, "0001-01-01", "9999-12-31")
+        cloud = layout_cloud(freq)
+        unplaced = sum(1 for t in cloud if not t.placed)
+        if unplaced:
+            log.info("tag_cloud_unplaced", count=unplaced, total=len(cloud))
         ranked = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
-        return _no_store(templates.TemplateResponse(request, "tags.html.j2", _ctx(tags=ranked)))
+        return _no_store(
+            templates.TemplateResponse(
+                request,
+                "tags.html.j2",
+                _ctx(
+                    tags=ranked,
+                    cloud=cloud,
+                    canvas_width=DEFAULT_WIDTH,
+                    canvas_height=DEFAULT_HEIGHT,
+                ),
+            )
+        )
 
     @app.get("/search", response_class=HTMLResponse)
     async def search_view(request: Request, q: str | None = Query(None)) -> HTMLResponse:
