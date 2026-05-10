@@ -65,6 +65,34 @@ def test_parse_extracts_tags_lowercased_deduplicated() -> None:
     assert sorted(parsed.tags) == ["cooking", "work"]
 
 
+def test_parse_tag_regex_with_hyphen_captures_full_token() -> None:
+    """Default regex should allow hyphenated tags like #key-value."""
+    raw = _eml(body_text="Mood: 💪\n\nSome note #key-value here.")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#([\w-]+)")
+    assert parsed.tags == ["key-value"]
+
+
+def test_parse_tag_regex_with_hyphen_captures_multi_word_tag() -> None:
+    """Hyphenated tags with multiple segments should be captured whole."""
+    raw = _eml(body_text="Mood: 💪\n\nLong day #two-word-tag yeah.")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#([\w-]+)")
+    assert parsed.tags == ["two-word-tag"]
+
+
+def test_parse_tag_regex_does_not_capture_trailing_punctuation() -> None:
+    """Trailing comma/period must not be captured as part of the tag."""
+    raw = _eml(body_text="Mood: 💪\n\nWrap up #tag, and end with #worknote.")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#([\w-]+)")
+    assert sorted(parsed.tags) == ["tag", "worknote"]
+
+
+def test_parse_tag_regex_underscore_still_captured_regression() -> None:
+    """Underscore was already captured by \\w; ensure that still holds with the new default."""
+    raw = _eml(body_text="Mood: 💪\n\nKeep it #key_value working.")
+    parsed = parse_reply(raw, mood_regex=r"^\s*Mood:\s*(\S+)", tag_regex=r"#([\w-]+)")
+    assert parsed.tags == ["key_value"]
+
+
 def test_parse_strips_quoted_thread() -> None:
     body = (
         "Mood: 🌧️\n\nRainy walk in the park.\n\n"

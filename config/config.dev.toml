@@ -25,7 +25,7 @@ body_template    = "templates/emails/prompt.txt.j2"
 
 [parsing]
 mood_regex = '^\s*Mood:\s*(\S+)'
-tag_regex  = '#(\w+)'
+tag_regex  = '#([\w-]+)'
 max_photos = 4
 max_videos = 2
 
