@@ -1,9 +1,10 @@
 {% extends "base.html.j2" %}
+{% from "_macros.html.j2" import tag_chip %}
 {% block title %}{{ entry.date }} — Driftnote{% endblock %}
 {% block content %}
 <article class="entry">
   <h1>{{ entry.date }} {% if entry.mood %}<span class="mood">{{ entry.mood }}</span>{% endif %}</h1>
-  <p class="tags">{% for t in tags %}<a href="/?tag={{ t }}">#{{ t }}</a>{% endfor %}</p>
+  <p class="tags">{% for t in tags %}{{ tag_chip(t) }}{% endfor %}</p>
   <div class="body">{{ body_html|safe }}</div>
   <section class="media">
     {% for m in media if m.kind == "photo" %}
