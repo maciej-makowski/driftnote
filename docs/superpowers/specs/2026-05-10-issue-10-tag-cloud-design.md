@@ -18,6 +18,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Public canvas dimensions — single source of truth shared with the
+# tags_view route handler so handler/template/CSS stay in agreement.
+DEFAULT_WIDTH = 600
+DEFAULT_HEIGHT = 400
+
 
 @dataclass(frozen=True)
 class CloudTag:
@@ -32,8 +37,8 @@ class CloudTag:
 def layout_cloud(
     tag_counts: dict[str, int],
     *,
-    width: int = 600,
-    height: int = 400,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
     min_font: int = 12,
     max_font: int = 36,
     max_steps: int = 500,
@@ -41,13 +46,13 @@ def layout_cloud(
     ...
 ```
 
-The function returns one `CloudTag` per input tag, in descending-frequency order. Tags that fail to place after `max_steps` are returned with `placed=False` and (x, y) set to (0, 0); the template skips them.
+The function returns one `CloudTag` per input tag, in descending-frequency / alphabetical-tie order. Tags that fail to place after `max_steps` are returned with `placed=False` and (x, y) set to (0, 0); the template skips them. The route handler imports `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` to thread the same numbers into the template context.
 
 ## Algorithm
 
-1. **Sort** input by count descending. Empty input → `[]` immediately.
+1. **Sort** input by count descending, with alphabetical tie-break (`sorted(..., key=lambda kv: (-kv[1], kv[0]))`). Empty input → `[]` immediately. With all counts equal, every tag receives `max_font` (sqrt of 1.0) and the spiral order is alphabetical.
 2. **Font scale** uses the square root of the normalised count for smoother visual distribution when one tag dominates: `font_size = round(min_font + (max_font - min_font) * sqrt(count / max_count))`.
-3. **Bounding box estimate**: `bbox_w = font * 0.6 * (len(name) + 1)` (the `+1` accounts for the `#` prefix the template prepends), `bbox_h = font * 1.2`. Pad with 4 px margin on every side to absorb width-estimation slop in proportional fonts.
+3. **Bounding box estimate**: `bbox_w = font * 0.6 * (len(name) + 1)` (the `+1` accounts for the `#` prefix the template prepends), `bbox_h = font * 1.2`. Pad with 4 px margin on every side to absorb width-estimation slop in proportional fonts. The returned `(x, y)` is the **un-padded** top-left; the 4 px margin is applied to the bbox used for collision testing only — the template renders `left:{{ t.x }}px` directly.
 4. **Archimedean spiral** from canvas centre:
    - `theta = step * 0.3` (radians)
    - `r = step * 1.5` (px)
@@ -81,6 +86,7 @@ tags.html.j2 (loops over cloud; emits absolutely-positioned <a>s)
 {% block title %}Tags — Driftnote{% endblock %}
 {% block content %}
 <h1>Tags</h1>
+{% if cloud %}
 <div class="tag-cloud-canvas" style="width:{{ canvas_width }}px;height:{{ canvas_height }}px">
   {% for t in cloud %}
     {% if t.placed %}
@@ -88,6 +94,7 @@ tags.html.j2 (loops over cloud; emits absolutely-positioned <a>s)
     {% endif %}
   {% endfor %}
 </div>
+{% endif %}
 <ul class="tag-cloud">
   {% for tag, count in tags %}
     <li>{{ tag_chip(tag, count=count, size_rem=0.8 + count * 0.1) }}</li>
@@ -147,8 +154,8 @@ async def tags_view(request: Request) -> HTMLResponse:
             _ctx(
                 tags=ranked,
                 cloud=cloud,
-                canvas_width=600,
-                canvas_height=400,
+                canvas_width=DEFAULT_WIDTH,
+                canvas_height=DEFAULT_HEIGHT,
             ),
         )
     )
@@ -215,6 +222,13 @@ def test_layout_cloud_font_sizes_clamped_to_range() -> None:
     cloud = layout_cloud({f"t{i}": i + 1 for i in range(10)}, min_font=10, max_font=24)
     for t in cloud:
         assert 10 <= t.font_size <= 24
+
+
+def test_layout_cloud_identical_counts_all_at_max_font() -> None:
+    """All-equal counts → sqrt(1.0) = 1 → every tag at max_font; ordering alphabetic."""
+    cloud = layout_cloud({"banana": 5, "apple": 5, "cherry": 5}, min_font=12, max_font=36)
+    assert [t.name for t in cloud] == ["apple", "banana", "cherry"]
+    assert all(t.font_size == 36 for t in cloud)
 ```
 
 ### Integration (`tests/integration/test_web_routes_browse.py`)
@@ -247,6 +261,9 @@ assert "left:" in r.text
 
 **Risk:** Square-root scaling looks too uniform when the count distribution is itself flat (everyone has 5 entries, one has 6).
 **Mitigation:** Acceptable — the layout still provides spatial differentiation by virtue of the spiral. If the user wants more contrast they can adjust `min_font`/`max_font` on the route call.
+
+**Risk:** Tag names wider than the canvas at `max_font` (e.g. a 60-character tag at 36 px ≈ 1300 px) cannot be placed at any spiral step and always come back `placed=False`.
+**Mitigation:** Accepted — the mobile flat-list fallback surfaces these regardless. Real journal tags are short enough that this is theoretical.
 
 ## Out of scope
 
