@@ -25,6 +25,7 @@ from driftnote.repository.entries import (
     list_tags_for_date,
     search_fts,
     tag_frequencies_in_range,
+    tags_for_dates,
 )
 from driftnote.repository.media import list_media
 from driftnote.web.banners import compute_banners
@@ -64,11 +65,12 @@ def install_browse_routes(
         if tag:
             with session_scope(engine) as session:
                 entries = list_entries_by_tag(session, tag)
+                tags_by_date = tags_for_dates(session, [e.date for e in entries])
             return _no_store(
                 templates.TemplateResponse(
                     request,
                     "search.html.j2",
-                    _ctx(q=f"#{tag}", results=entries),
+                    _ctx(q=f"#{tag}", results=entries, tags_by_date=tags_by_date),
                 )
             )
 
@@ -145,18 +147,22 @@ def install_browse_routes(
     @app.get("/search", response_class=HTMLResponse)
     async def search_view(request: Request, q: str | None = Query(None)) -> HTMLResponse:
         results: list[EntryRecord] = []
+        tags_by_date: dict[str, list[str]] = {}
         error: str | None = None
         if q:
             try:
                 with session_scope(engine) as session:
                     results = search_fts(session, q)
+                    tags_by_date = tags_for_dates(session, [r.date for r in results])
             except OperationalError as exc:
                 orig = getattr(exc, "orig", None)
                 msg = orig.args[0] if orig and orig.args else str(exc)
                 error = f"invalid search query: {msg}"
         return _no_store(
             templates.TemplateResponse(
-                request, "search.html.j2", _ctx(q=q, results=results, error=error)
+                request,
+                "search.html.j2",
+                _ctx(q=q, results=results, error=error, tags_by_date=tags_by_date),
             )
         )
 

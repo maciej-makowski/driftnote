@@ -197,3 +197,17 @@ def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:
     assert r.status_code == 200
     assert "<script>" not in r.text
     assert "&lt;script&gt;" in r.text
+
+
+def test_search_results_render_tag_chips_per_hit(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """Each search hit shows the entry's tags as clickable chips."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/search?q=risotto")
+    assert r.status_code == 200
+    # The fixture's seeded entry has tags ["work", "cooking"]; both must
+    # render as tag-chip links in the response.
+    assert 'class="tag-chip"' in r.text
+    assert 'href="/?tag=work"' in r.text
+    assert 'href="/?tag=cooking"' in r.text
