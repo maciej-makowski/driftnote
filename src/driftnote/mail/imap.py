@@ -36,7 +36,13 @@ async def _connect(transport: ImapTransport) -> aioimaplib.IMAP4 | aioimaplib.IM
     else:
         client = aioimaplib.IMAP4(host=transport.host, port=transport.port)
     await client.wait_hello_from_server()
-    await client.login(transport.username, transport.password)
+    rc = await client.login(transport.username, transport.password)
+    # aioimaplib's login() returns Response(result='NO'|'OK', lines=...) rather than
+    # raising on auth failure. Without this check the next command (e.g. SELECT) would
+    # fail with the misleading "illegal in state NONAUTH" — surface the real error.
+    if rc.result != "OK":
+        detail = b" ".join(rc.lines).decode("ascii", "replace")
+        raise RuntimeError(f"IMAP LOGIN failed for {transport.username}: {detail}")
     return client
 
 
