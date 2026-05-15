@@ -12,6 +12,7 @@ from driftnote.repository.jobs import (
     JobRunRecord,
     acknowledge_all_for_job,
     acknowledge_run,
+    count_unacked_failures_for_job,
     finish_job_run,
     last_run,
     last_successful_run,
@@ -185,6 +186,38 @@ def test_recent_runs_for_job_statuses_none_returns_all_statuses(engine: Engine) 
     with session_scope(engine) as session:
         rows = recent_runs_for_job(session, "imap_poll")
     assert {r.id for r in rows} == {ok, err}
+
+
+def test_count_unacked_failures_for_job_counts_only_unacked_failures(engine: Engine) -> None:
+    """Counts error/warn rows where acknowledged_at IS NULL, scoped to the named job."""
+    with session_scope(engine) as session:
+        # Two unacked failures for imap_poll.
+        a = record_job_run(session, job="imap_poll", started_at="2026-05-01T00:00:00Z")
+        finish_job_run(session, run_id=a, finished_at="2026-05-01T00:00:01Z", status="error")
+        b = record_job_run(session, job="imap_poll", started_at="2026-05-02T00:00:00Z")
+        finish_job_run(session, run_id=b, finished_at="2026-05-02T00:00:01Z", status="warn")
+        # One acked failure — must be excluded.
+        c = record_job_run(session, job="imap_poll", started_at="2026-05-03T00:00:00Z")
+        finish_job_run(session, run_id=c, finished_at="2026-05-03T00:00:01Z", status="error")
+        acknowledge_run(session, run_id=c, at="2026-05-03T00:01:00Z")
+        # An ok run — must be excluded regardless of acked-ness.
+        d = record_job_run(session, job="imap_poll", started_at="2026-05-04T00:00:00Z")
+        finish_job_run(session, run_id=d, finished_at="2026-05-04T00:00:01Z", status="ok")
+        # An unacked failure for a different job — must be excluded by job filter.
+        e = record_job_run(session, job="backup", started_at="2026-05-05T00:00:00Z")
+        finish_job_run(session, run_id=e, finished_at="2026-05-05T00:00:01Z", status="error")
+    with session_scope(engine) as session:
+        count = count_unacked_failures_for_job(session, "imap_poll")
+    assert count == 2
+
+
+def test_count_unacked_failures_for_job_returns_zero_for_clean_job(engine: Engine) -> None:
+    with session_scope(engine) as session:
+        ok = record_job_run(session, job="imap_poll", started_at="2026-05-01T00:00:00Z")
+        finish_job_run(session, run_id=ok, finished_at="2026-05-01T00:00:01Z", status="ok")
+    with session_scope(engine) as session:
+        count = count_unacked_failures_for_job(session, "imap_poll")
+    assert count == 0
 
 
 def test_acknowledge_all_for_job_zero_unacked(engine: Engine) -> None:
