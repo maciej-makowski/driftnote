@@ -160,9 +160,23 @@ def recent_alerts_of_kind(
     return [_to_record(r) for r in session.scalars(stmt)]
 
 
-def recent_runs_for_job(session: Session, job: str, *, limit: int = 100) -> list[JobRunRecord]:
-    """Most-recent-first runs for a single job, capped at `limit`."""
-    stmt = select(JobRun).where(JobRun.job == job).order_by(JobRun.started_at.desc()).limit(limit)
+def recent_runs_for_job(
+    session: Session,
+    job: str,
+    *,
+    statuses: list[str] | None = None,
+    limit: int = 100,
+) -> list[JobRunRecord]:
+    """Most-recent-first runs for a single job, capped at `limit`.
+
+    If `statuses` is provided, the result is filtered to rows whose
+    status is in that list. Pass `["error", "warn"]` for a failures-only
+    view; pass `None` (default) for any status.
+    """
+    stmt = select(JobRun).where(JobRun.job == job)
+    if statuses is not None:
+        stmt = stmt.where(JobRun.status.in_(statuses))
+    stmt = stmt.order_by(JobRun.started_at.desc()).limit(limit)
     return [_to_record(r) for r in session.scalars(stmt)]
 
 

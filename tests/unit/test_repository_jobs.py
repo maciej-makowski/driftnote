@@ -160,6 +160,33 @@ def test_recent_runs_for_job_respects_limit(engine: Engine) -> None:
     assert rows[0].id == ids[-1]
 
 
+def test_recent_runs_for_job_filters_by_statuses(engine: Engine) -> None:
+    """statuses=['error', 'warn'] returns only rows in those statuses; ok is excluded."""
+    with session_scope(engine) as session:
+        ok = record_job_run(session, job="imap_poll", started_at="2026-05-01T00:00:00Z")
+        finish_job_run(session, run_id=ok, finished_at="2026-05-01T00:00:01Z", status="ok")
+        err = record_job_run(session, job="imap_poll", started_at="2026-05-02T00:00:00Z")
+        finish_job_run(session, run_id=err, finished_at="2026-05-02T00:00:01Z", status="error")
+        warn = record_job_run(session, job="imap_poll", started_at="2026-05-03T00:00:00Z")
+        finish_job_run(session, run_id=warn, finished_at="2026-05-03T00:00:01Z", status="warn")
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "imap_poll", statuses=["error", "warn"])
+    assert [r.id for r in rows] == [warn, err]
+    assert all(r.status in ("error", "warn") for r in rows)
+
+
+def test_recent_runs_for_job_statuses_none_returns_all_statuses(engine: Engine) -> None:
+    """Default behaviour (statuses=None) returns every status — regression check."""
+    with session_scope(engine) as session:
+        ok = record_job_run(session, job="imap_poll", started_at="2026-05-01T00:00:00Z")
+        finish_job_run(session, run_id=ok, finished_at="2026-05-01T00:00:01Z", status="ok")
+        err = record_job_run(session, job="imap_poll", started_at="2026-05-02T00:00:00Z")
+        finish_job_run(session, run_id=err, finished_at="2026-05-02T00:00:01Z", status="error")
+    with session_scope(engine) as session:
+        rows = recent_runs_for_job(session, "imap_poll")
+    assert {r.id for r in rows} == {ok, err}
+
+
 def test_acknowledge_all_for_job_zero_unacked(engine: Engine) -> None:
     """No unacked rows -> count is 0 and no rows are touched."""
     with session_scope(engine) as session:
