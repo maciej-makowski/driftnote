@@ -174,36 +174,7 @@ def test_count_unacked_failures_for_job_returns_zero_for_clean_job(engine: Engin
     assert count == 0
 ```
 
-Also update the import block at the top of `tests/unit/test_repository_jobs.py`. Find the existing import for repository helpers (around line 20):
-
-```python
-from driftnote.repository.jobs import (
-    acknowledge_all_for_job,
-    acknowledge_run,
-    finish_job_run,
-    last_run,
-    last_successful_run,
-    recent_failures,
-    recent_runs_for_job,
-    record_job_run,
-)
-```
-
-Insert `count_unacked_failures_for_job` alphabetically (between `acknowledge_run` and `finish_job_run`):
-
-```python
-from driftnote.repository.jobs import (
-    acknowledge_all_for_job,
-    acknowledge_run,
-    count_unacked_failures_for_job,
-    finish_job_run,
-    last_run,
-    last_successful_run,
-    recent_failures,
-    recent_runs_for_job,
-    record_job_run,
-)
-```
+Also update the import block at the top of `tests/unit/test_repository_jobs.py`. The existing block imports several symbols (`JobRunRecord`, `acknowledge_all_for_job`, `acknowledge_run`, `finish_job_run`, `last_run`, `last_successful_run`, `recent_alerts_of_kind`, `recent_failures`, `recent_runs_for_job`, `record_job_run` — read the file before editing; the exact list matters). Do an **additive** edit: insert a single line `    count_unacked_failures_for_job,` alphabetically positioned between `acknowledge_run,` and `finish_job_run,`. Do NOT replace the entire block — symbols like `JobRunRecord` and `recent_alerts_of_kind` must stay, or unrelated tests will break.
 
 - [ ] **Step 2: Run the new tests, confirm `ImportError` at collection**
 
@@ -537,7 +508,13 @@ def test_admin_ack_all_button_hidden_when_no_unacked(
 
 ```python
 def test_admin_drill_defaults_to_failures_only(setup: tuple[FastAPI, Engine, Path]) -> None:
-    """Without query string, drill renders error/warn rows only; OK rows are hidden."""
+    """Without query string, drill renders error/warn rows only; OK rows are hidden.
+
+    NOTE: assertions target the runs-table row class, not raw timestamps. The card
+    panel above the table renders `card.last_success_at`, which would be the OK
+    row's timestamp regardless of filter — so timestamp-based assertions would be
+    trivially satisfied (or trivially fail) by the card panel.
+    """
     fapp, eng, _ = setup
     with session_scope(eng) as session:
         ok = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
@@ -546,14 +523,17 @@ def test_admin_drill_defaults_to_failures_only(setup: tuple[FastAPI, Engine, Pat
         finish_job_run(session, run_id=err, finished_at="2026-05-06T09:00:01Z", status="error")
     r = TestClient(fapp).get("/admin/runs/imap_poll")
     assert r.status_code == 200
-    # The error row's started_at is rendered.
-    assert "2026-05-06T09:00:00Z" in r.text
-    # The OK row's started_at is NOT rendered (filtered out).
-    assert "2026-05-06T08:00:00Z" not in r.text
+    # The runs table contains the error row (status-error) but not the OK row.
+    assert 'class="status-error"' in r.text
+    assert 'class="status-ok"' not in r.text
 
 
 def test_admin_drill_show_all_includes_ok_rows(setup: tuple[FastAPI, Engine, Path]) -> None:
-    """?show_only_failed=0 (the unchecked-submit shape) shows OK rows too."""
+    """?show_only_failed=0 (the unchecked-submit shape) shows OK rows too.
+
+    Again uses status-class markers rather than timestamps for the same card-panel
+    reason as the failures-only test.
+    """
     fapp, eng, _ = setup
     with session_scope(eng) as session:
         ok = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
@@ -562,8 +542,8 @@ def test_admin_drill_show_all_includes_ok_rows(setup: tuple[FastAPI, Engine, Pat
         finish_job_run(session, run_id=err, finished_at="2026-05-06T09:00:01Z", status="error")
     r = TestClient(fapp).get("/admin/runs/imap_poll?show_only_failed=0")
     assert r.status_code == 200
-    assert "2026-05-06T08:00:00Z" in r.text  # OK row visible
-    assert "2026-05-06T09:00:00Z" in r.text  # error row visible
+    assert 'class="status-ok"' in r.text     # OK row visible in the table
+    assert 'class="status-error"' in r.text  # error row visible
 
 
 def test_admin_drill_ack_all_visible_when_failures_outside_visible_window(
@@ -625,6 +605,9 @@ def test_admin_drill_acked_error_in_view_shows_no_per_row_button(
     """An acknowledged error is visible in the failures-only view but has no per-row ack button.
 
     Locks the template's existing `not r.acknowledged_at` guard against regression.
+    Uses the status-error class marker rather than timestamps, since the card panel
+    above the table renders `card.last_started_at` and would trivially satisfy a
+    timestamp-based assertion.
     """
     fapp, eng, _ = setup
     with session_scope(eng) as session:
@@ -633,8 +616,8 @@ def test_admin_drill_acked_error_in_view_shows_no_per_row_button(
         acknowledge_run(session, run_id=rid, at="2026-05-06T08:01:00Z")
     r = TestClient(fapp).get("/admin/runs/imap_poll")
     assert r.status_code == 200
-    # The error row's started_at IS in the body (acked errors stay visible in the failure view).
-    assert "2026-05-06T08:00:00Z" in r.text
+    # The error row IS rendered in the runs table (acked errors stay visible in the failure view).
+    assert 'class="status-error"' in r.text
     # But its per-row ack button is NOT rendered (template guard: not r.acknowledged_at).
     assert f'action="/admin/runs/{rid}/ack"' not in r.text
     # Bulk-ack button is also hidden (no unacked failures).
@@ -643,20 +626,19 @@ def test_admin_drill_acked_error_in_view_shows_no_per_row_button(
 
 - [ ] **Step 2: Add `acknowledge_run` to the test file's imports if needed**
 
-The new acked-error test uses `acknowledge_run`. Check the existing import block at the top of `tests/integration/test_web_routes_media_and_admin.py` — it imports from `driftnote.repository.jobs`. If `acknowledge_run` isn't already there, add it alphabetically (between `acknowledge_all_for_job` and other helpers).
+The new acked-error test uses `acknowledge_run`. The current import block in `tests/integration/test_web_routes_media_and_admin.py` is:
 
 ```python
-from driftnote.repository.jobs import (
-    acknowledge_all_for_job,
-    acknowledge_run,
-    finish_job_run,
-    last_run,
-    recent_failures,
-    record_job_run,
-)
+from driftnote.repository.jobs import finish_job_run, record_job_run
 ```
 
-(The exact existing import list may differ — match its style and just ensure `acknowledge_run` is present.)
+Do an **additive** edit: add `acknowledge_run` so the line reads:
+
+```python
+from driftnote.repository.jobs import acknowledge_run, finish_job_run, record_job_run
+```
+
+Don't remove or reorder anything else.
 
 ### Task 2.6: Run the suites and commit the single big change
 
