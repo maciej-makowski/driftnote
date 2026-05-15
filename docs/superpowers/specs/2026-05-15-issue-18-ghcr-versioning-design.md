@@ -132,8 +132,10 @@ The `help` text updates to mention this:
 
 ```
   pull-registry  Alternative to build: pull from GHCR + retag. Defaults to
-                 :prod; override with `make pull-registry TAG=0.1.0`.
+                 :prod; override with `make pull-registry TAG=sha-abc1234`.
 ```
+
+The `TAG=` override accepts any GHCR tag verbatim. The intended pin handle is `sha-<short>` (the immutable per-commit handle). Bare `TAG=abc1234` without the `sha-` prefix would 404 — the prefix is part of the tag name, not a separator.
 
 ## Quadlet
 
@@ -236,7 +238,7 @@ The CI workflow changes are exercised on the PR itself (PR-only build path) and 
 **Mitigation:** Already mitigated by the architecture — secrets are mounted at runtime, not baked into the image. The Containerfile only `COPY`s the `src/` tree, `pyproject.toml`, and lockfile.
 
 **Risk:** Existing GHCR images under `:sha-<full>` (the current scheme) become orphaned by the tag-naming change to `:sha-<short>`.
-**Mitigation:** Cosmetic only — they still pull by full tag. Don't bother deleting them; they age out when retention policy lands (deferred).
+**Mitigation:** Cosmetic only — they still pull by full tag. The new retention workflow (this PR) will age them out within ~15 master pushes.
 
 **Risk:** `prod` and `latest` being synonymous today encourages future drift where someone re-uses one without the other. Documentation must be clear that `prod` is the user-pin and `latest` is the Docker convention.
 **Mitigation:** Spec text + README phrasing makes this explicit. The two tags moving in lockstep is intentional today; decoupling is a future spec.
