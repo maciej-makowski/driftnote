@@ -20,7 +20,10 @@ SCRIPTS_DIR    := $(HOME)/.local/lib/driftnote/scripts
 QUADLET_DIR    := $(HOME)/.config/containers/systemd
 USER_UNIT_DIR  := $(HOME)/.config/systemd/user
 LOCAL_IMAGE    := localhost/driftnote:local
-REGISTRY_IMAGE := ghcr.io/maciej-makowski/driftnote:latest
+# Default to the rolling `:prod` tag; override with `make pull-registry TAG=sha-abc1234`
+# to pin to a specific build. The TAG= override accepts any GHCR tag verbatim.
+TAG            ?= prod
+REGISTRY_IMAGE := ghcr.io/maciej-makowski/driftnote:$(TAG)
 
 .DEFAULT_GOAL := help
 .PHONY: help install uninstall reinstall \
@@ -46,7 +49,8 @@ help:
 	@echo "  scripts        Copy backup.sh + alert-email.py to ~/.local/lib/driftnote/scripts/."
 	@echo "  units          Copy quadlet + backup units to ~/.config/, daemon-reload."
 	@echo "  build          podman build -f Containerfile -t localhost/driftnote:local . (default)."
-	@echo "  pull-registry  Alternative to build: pull from GHCR + retag. Requires GHCR auth."
+	@echo "  pull-registry  Alternative to build: pull from GHCR + retag. Defaults to :prod;"
+	@echo "                 override with \`make pull-registry TAG=sha-abc1234\`."
 
 check-prereqs:
 	@test -f "$(DATA_DIR)/config.toml" \
@@ -79,10 +83,9 @@ build:
 	@podman build -f Containerfile -t "$(LOCAL_IMAGE)" .
 	@echo "✓ image built locally as $(LOCAL_IMAGE)"
 
-# Alternative to `build`: pull a prebuilt image from GHCR. Requires the
-# package to be public, OR `podman login ghcr.io` on this host. Most
-# personal installs are better off with `build`; this target is here for
-# anyone who explicitly prefers the registry path.
+# Alternative to `build`: pull a prebuilt image from GHCR. The package is
+# public — no `podman login` required. Defaults to the `:prod` rolling tag;
+# pin to a specific build via `make pull-registry TAG=sha-abc1234`.
 pull-registry:
 	@podman pull "$(REGISTRY_IMAGE)"
 	@podman tag "$(REGISTRY_IMAGE)" "$(LOCAL_IMAGE)"
