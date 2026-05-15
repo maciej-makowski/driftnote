@@ -149,7 +149,16 @@ make install
 
 `make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `build` (`podman build -f Containerfile -t localhost/driftnote:local .`), and `start` (`systemctl --user start driftnote.service` plus `systemctl --user enable --now driftnote-backup.timer`).
 
-The default install builds the image locally from the Containerfile in your checkout — no GitHub interaction is needed beyond the initial `git clone` in §3. If you'd rather pull a prebuilt image from GHCR (and have logged in via `podman login ghcr.io`, since the package is private), run `make pull-registry` instead of `make build` (or as a substitute for `make install`'s build step: `make check-prereqs scripts units pull-registry start`).
+The default install builds the image locally from the Containerfile in your checkout — no GitHub interaction is needed beyond the initial `git clone` in §3. If you'd rather pull a prebuilt image from GHCR, run `make pull-registry` instead of `make build` (or as a substitute for `make install`'s build step: `make check-prereqs scripts units pull-registry start`). The GHCR package is public; no `podman login` required.
+
+`make pull-registry` defaults to the `:prod` rolling tag — always the latest build that passed CI. To pin to a specific build (e.g. after a regression on `master`), pass `TAG=sha-<short>` from the GHCR package page:
+
+```bash
+make pull-registry TAG=sha-abc1234
+make restart
+```
+
+`make pull-registry TAG=prod` returns to the rolling tag.
 
 Run `make help` to see every target. Useful day-to-day:
 - `make status` — service + timer status
@@ -294,7 +303,7 @@ make build && make restart
 journalctl --user -u driftnote.service -n 50   # confirm it came back up cleanly
 ```
 
-(Or, if you're on the GHCR-pull path: `make pull-registry && make restart`.)
+(Or, if you're on the GHCR-pull path: `make pull-registry TAG=sha-abc1234 && make restart` — substitute the short SHA of a known-good previous build from the GHCR package page.)
 
 If a future release introduces a database schema change, the release notes will include migration instructions. There is no automated migration tooling.
 

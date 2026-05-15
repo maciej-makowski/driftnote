@@ -1,0 +1,21 @@
+name: Clean up old container images
+on:
+  schedule:
+    - cron: "0 3 * * 0"   # Sundays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old GHCR versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: driftnote
+          package-type: container
+          min-versions-to-keep: 15
+          delete-only-untagged-versions: false
+          ignore-versions: '^(latest|prod)$'

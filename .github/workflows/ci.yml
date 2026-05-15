@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  packages: write   # publish-container needs this; no-op for jobs that don't use the token
 
 jobs:
   test:
@@ -40,10 +41,45 @@ jobs:
         run: uv run pytest -m "not live" -v --cov=driftnote --cov-report=term-missing
 
   build-container:
+    # PR-only smoke build (no push). Catches Containerfile breakage in review.
     runs-on: ubuntu-latest
     needs: test
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v5
       - name: Build container (smoke)
+        run: docker build -f Containerfile -t driftnote:ci .
+
+  publish-container:
+    # Master-push only, after tests pass. Publishes :latest, :prod, :sha-<short>.
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute tags
+        id: tags
         run: |
-          docker build -f Containerfile -t driftnote:ci .
+          IMAGE="ghcr.io/${{ github.repository_owner }}/driftnote"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tags=$IMAGE:latest,$IMAGE:prod,$IMAGE:sha-$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          platforms: linux/arm64,linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
