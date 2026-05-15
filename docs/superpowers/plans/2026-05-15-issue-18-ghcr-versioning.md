@@ -402,7 +402,7 @@ git log --oneline master..HEAD
 git diff --stat master..HEAD
 ```
 
-Expected: 4 commits (the spec + spec-polish from earlier, plus the three feature commits from chunks 1-3 — adjust expectation if you committed differently). Diff stat should touch:
+Expected: 3 new feature commits on top of the spec + plan commits already on the branch (so 5+ total). Diff stat should touch:
 - `.github/workflows/ci.yml` (modified)
 - `.github/workflows/build-image.yml` (deleted)
 - `.github/workflows/cleanup-images.yml` (created)
