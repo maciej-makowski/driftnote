@@ -37,7 +37,15 @@
 
 {% if recent_runs is defined %}
 <h2>Runs for {{ job_filter }}</h2>
-{% if unacked_count and unacked_count > 1 %}
+<form method="get" action="/admin/runs/{{ job_filter }}" class="runs-filter">
+  <input type="hidden" name="show_only_failed" value="0">
+  <label>
+    <input type="checkbox" name="show_only_failed" value="1" {% if show_only_failed %}checked{% endif %}>
+    Show only failed runs
+  </label>
+  <button type="submit">Apply</button>
+</form>
+{% if unacked_count and unacked_count >= 1 %}
   <form method="post" action="/admin/runs/{{ job_filter }}/ack-all" class="ack-all">
     <button type="submit">Acknowledge all ({{ unacked_count }})</button>
   </form>
