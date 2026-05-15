@@ -147,14 +147,22 @@ Rolling-forward on the registry path (`pull-registry && restart`) works because 
 
 ## `deploy/README.md`
 
-Rewrite §4 ("Install") to describe both paths up front. Add explicit "switching paths" and "pinning" subsections referencing the new targets. Drop any remaining language that implies retag-under-localhost. The §8 rollback bullet ("Or, if you're on the GHCR-pull path: …") gets updated to reflect that rollback on the registry path is `make reinstall-registry TAG=sha-...` rather than the old `pull-registry && restart` pattern.
+Rewrite §4 ("Install") to describe both paths up front. Add explicit "switching paths" and "pinning" subsections referencing the new targets. Drop any remaining language that implies retag-under-localhost.
+
+**Specific lines/phrases to verify removed or rewritten** (current line numbers; may drift):
+
+- §4 line ~152: the parenthetical that describes the alternate install chain `make check-prereqs scripts units pull-registry start` is now broken (units would error without `IMAGE=`, and `pull-registry` no longer retags). Replace with the new `make install-registry` path.
+- Any "Manual equivalent" subsection bullet referencing `podman tag` after a `podman pull` — drop.
+- §8 rollback bullet: ("Or, if you're on the GHCR-pull path: …") → update to `make reinstall-registry TAG=sha-...`.
+
+**Intentionally untouched:** §7 ("Update path") describes the local-build update flow (`make build && make restart`) and remains valid. The registry-path update flow goes in §4's new "Switching paths / pinning" subsection.
 
 ## Files touched
 
 | File | Change |
 |---|---|
 | `deploy/driftnote.container` | `Image=` becomes `__IMAGE__` placeholder; comment rewritten |
-| `Makefile` | `units` substitutes placeholder; `pull-registry` drops retag; new `install-registry` / `reinstall-registry` targets; `install` reorders prereqs (`build` before `units`); help rewritten |
+| `Makefile` | `units` substitutes placeholder + IMAGE guard; `pull-registry` drops retag (and its comment block rewritten); new `install-registry` / `reinstall-registry` targets; `install` reorders prereqs (`build` before `units`); `.PHONY` extended; help rewritten |
 | `deploy/README.md` | Rewrite §4 install paths; update §8 rollback hint |
 | `docs/superpowers/specs/2026-05-15-issue-34-quadlet-image-source-design.md` | This spec |
 
