@@ -23,7 +23,7 @@ The `Makefile` `pull-registry` target is parameterised to default to `:prod` wit
 
 ## Tag scheme
 
-### On every push to master that passes CI
+On every push to master that passes CI:
 
 | Tag | Mutable? | Purpose |
 |---|---|---|
@@ -35,20 +35,15 @@ Short SHA is the 7-character `git rev-parse --short HEAD` form — readable, cop
 
 `latest` and `prod` are synonymous *for now*. The separation exists so the user can later decouple them (e.g. `latest` points at a feature branch's prerelease while `prod` stays on a stable release). YAGNI to use that decoupling today; the design accommodates it.
 
-### On git tag push matching `v*.*.*`
-
-| Tag | Mutable? | Purpose |
-|---|---|---|
-| `<version>` | no (immutable) | The semver release, e.g. `0.1.0`, parsed from the git tag `v0.1.0` |
-
-Pure semver tags only — no floating `0.1` or `0` major/minor pointers. YAGNI for a one-user app; the user can pin to a specific patch release if they want stability and bump deliberately.
+**Semver / git-tag-driven releases are out of scope for this PR** — discussed during brainstorming and dropped as unnecessary overcomplication for a one-user app. The `sha-<short>` immutable tag is the sole pinning handle. If formal releases become useful later, this design can be extended with a `v*.*.*` trigger and an immutable version tag without restructuring.
 
 ### Out of scope
 
 - Multi-arch tags (the workflow already builds `linux/arm64` + `linux/amd64` into one manifest list — no change needed).
 - Image signing (cosign / sigstore). Deferred per #18.
-- GHCR retention / cleanup of old `sha-*` images. Deferred per #18.
-- Auto-derived semver from PR labels or commit messages. Manual `git tag v0.1.0 && git push --tags` is enough for a personal release cadence.
+- Semver / git-tag releases (`v0.1.0`, etc).
+- Auto-derived semver from PR labels or commit messages.
+- Floating minor/major version tags (`0.1`, `0`).
 
 ## GitHub Actions
 
@@ -59,7 +54,6 @@ name: CI
 on:
   push:
     branches: [master]
-    tags: ['v*.*.*']
   pull_request:
     branches: [master]
 
@@ -82,10 +76,10 @@ jobs:
         run: docker build -f Containerfile -t driftnote:ci .
 
   publish-container:
-    # Push-only: master branch or v*.*.* tag, after tests pass.
+    # Master-push only, after tests pass.
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v5
       - name: Log in to GHCR
@@ -100,13 +94,8 @@ jobs:
         id: tags
         run: |
           IMAGE="ghcr.io/${{ github.repository_owner }}/driftnote"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-            echo "tags=$IMAGE:$VERSION" >> "$GITHUB_OUTPUT"
-          else
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            echo "tags=$IMAGE:latest,$IMAGE:prod,$IMAGE:sha-$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          fi
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tags=$IMAGE:latest,$IMAGE:prod,$IMAGE:sha-$SHORT_SHA" >> "$GITHUB_OUTPUT"
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
@@ -123,7 +112,7 @@ Key behaviours:
 
 - **`test` always runs**, on PRs and pushes.
 - **`build-container` runs on PRs only**, after `test`, builds without pushing. Catches Containerfile breakage in review.
-- **`publish-container` runs on pushes only**, after `test`, pushes the tag set described above.
+- **`publish-container` runs on master-push only**, after `test`, pushes the three tags.
 - **A failing `test` job blocks both build jobs.** No more "broken image lands on `latest` because tests are red."
 
 ## Makefile
@@ -150,6 +139,44 @@ The `help` text updates to mention this:
 
 `deploy/driftnote.container` is **unchanged**. It continues to reference `localhost/driftnote:local`. The pull-vs-build choice happens at the `make` level; both paths terminate with the same locally-tagged image.
 
+## Retention / cleanup workflow
+
+A new `.github/workflows/cleanup-images.yml` runs weekly (and on-demand) to keep the GHCR package page scannable. Without cleanup, each master push leaves an `sha-<short>`-tagged version behind indefinitely.
+
+**Retention policy: keep the 15 most-recent versions.** That's roughly one month of activity at current pace — generous enough to roll back to anything plausibly useful, aggressive enough that the package page stays readable.
+
+```yaml
+name: Clean up old container images
+on:
+  schedule:
+    - cron: "0 3 * * 0"   # Sundays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: driftnote
+          package-type: container
+          min-versions-to-keep: 15
+          delete-only-untagged-versions: false
+          ignore-versions: '^(latest|prod)$'
+```
+
+**Behaviour:**
+
+- A GHCR "version" is one image digest (one multi-arch manifest). Each green master push creates one new version. So `min-versions-to-keep: 15` retains the 15 most-recent master-push builds.
+- `delete-only-untagged-versions: false` allows deletion of versions whose only remaining tag is `sha-<short>`. Without this, every old version would be retained forever because they each have an immutable sha tag.
+- `ignore-versions: '^(latest|prod)$'` is belt-and-braces — versions tagged with those names are the most recent and wouldn't be candidates anyway, but explicit exclusion documents intent and protects against a future change that ages-out the rolling tag.
+- Weekly cron is enough; manual `workflow_dispatch` is available if storage ever becomes urgent (it won't for public packages).
+
+**Size context:** the image is ~300–400 MB per version in the registry (compressed multi-arch). With 15 retained, total storage is ~5–6 GB. Public GHCR packages have unlimited storage so this isn't a billing concern — the goal is hygiene, not cost.
+
 ## `deploy/README.md` updates
 
 - Drop the "Requires GHCR auth" caveat throughout — the package is public after this lands.
@@ -171,8 +198,9 @@ The PR description documents this as a required post-merge step.
 |---|---|
 | `.github/workflows/ci.yml` | Add `publish-container` job; gate existing `build-container` to PRs; add `packages: write` permission |
 | `.github/workflows/build-image.yml` | Delete |
+| `.github/workflows/cleanup-images.yml` | New — weekly retention pruning |
 | `Makefile` | Add `TAG ?= prod`; update `REGISTRY_IMAGE` to interpolate; update help |
-| `deploy/README.md` | Drop GHCR auth caveats; add "Pinning a specific version" subsection |
+| `deploy/README.md` | Drop GHCR auth caveats; add pinning-by-sha subsection |
 | `docs/superpowers/specs/2026-05-15-issue-18-ghcr-versioning-design.md` | This spec |
 
 No production code touched. No new tests — the change is workflow + Makefile + docs.
@@ -181,22 +209,22 @@ No production code touched. No new tests — the change is workflow + Makefile +
 
 - **CI workflow runs on PR**: only `test` + `build-container` (smoke) run, no `publish-container`.
 - **CI workflow runs on master push**: `test` runs; if green, `publish-container` builds + pushes three tags (`latest`, `prod`, `sha-<short>`).
-- **CI workflow runs on `v0.1.0` tag push**: `test` runs; if green, `publish-container` builds + pushes one tag (`0.1.0`).
 - **CI workflow with failing tests**: `test` fails; neither build job runs.
 - **GHCR package public**: `podman pull ghcr.io/maciej-makowski/driftnote:prod` from a clean machine (no auth) succeeds.
 - **Pin override**: `make pull-registry TAG=sha-abc1234` pulls that specific image and retags it as `localhost/driftnote:local`.
+- **Cleanup workflow**: manual `workflow_dispatch` run prunes versions back to the 15-most-recent; verify on the GHCR package page that older `sha-*`-tagged versions disappear and `latest`/`prod` versions are untouched.
 
-The CI workflow changes are exercised on the PR itself (PR-only build path) and on the merge commit to master (push path). Tag-push behaviour can be verified by cutting a real `v0.1.0` tag once the PR lands — or by manually triggering via `workflow_dispatch` after dry-running the YAML.
+The CI workflow changes are exercised on the PR itself (PR-only build path) and on the merge commit to master (push path). The cleanup workflow can be smoke-tested by manually triggering it once after merge.
 
 ## Acceptance criteria
 
 - [ ] `publish-container` job pushes `latest` + `prod` + `sha-<short>` on green master push.
-- [ ] `publish-container` pushes `<version>` on green `v*.*.*` tag push.
 - [ ] PR builds run the smoke `build-container` only — no GHCR push.
 - [ ] Failing `test` blocks both build jobs.
 - [ ] `build-image.yml` is deleted.
-- [ ] `make pull-registry` defaults to `:prod`; `make pull-registry TAG=0.1.0` pins to a version.
-- [ ] `deploy/README.md` no longer mentions GHCR auth requirements; documents pinning.
+- [ ] `cleanup-images.yml` runs weekly + on `workflow_dispatch`, retains 15 most-recent versions, never deletes `latest`/`prod`.
+- [ ] `make pull-registry` defaults to `:prod`; `make pull-registry TAG=sha-abc1234` pins to a specific build.
+- [ ] `deploy/README.md` no longer mentions GHCR auth requirements; documents pinning by `sha-<short>`.
 - [ ] PR body documents the one-time `gh api` visibility flip.
 
 ## Risks
@@ -216,7 +244,7 @@ The CI workflow changes are exercised on the PR itself (PR-only build path) and 
 ## Out of scope
 
 - Image signing (cosign / sigstore).
-- GHCR retention / cleanup automation.
+- Semver / git-tag releases — discussed and dropped as unnecessary for current scale.
 - Repo-public decision — separate conversation after this lands.
 - Branch protection rules (a corollary benefit if repo eventually goes public).
 - Auto-derived semver from PR labels.
