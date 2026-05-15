@@ -139,34 +139,57 @@ EOF
 
 ---
 
-## 4. Install scripts + systemd units, pull the image, start
+## 4. Install scripts + systemd units, start
 
-The project ships a `Makefile` that bundles the install + start steps into a single command. From the repo checkout you cloned in §3:
+The project ships a `Makefile` that bundles the install + start steps into a single command. Two paths exist, both first-class:
+
+### Path A: Local build (default)
+
+Builds the container image on the RPi from the Containerfile in your checkout.
 
 ```bash
 make install
 ```
 
-`make install` runs the following in order: `check-prereqs` (verifies `~/.driftnote/{config.toml,driftnote.env}` exist with the right permissions and that linger is enabled), `scripts` (copies `backup.sh` + `alert-email.py` to `~/.local/lib/driftnote/scripts/`), `units` (copies the quadlet + backup units to `~/.config/containers/systemd/` and `~/.config/systemd/user/`, then `daemon-reload`), `build` (`podman build -f Containerfile -t localhost/driftnote:local .`), and `start` (`systemctl --user start driftnote.service` plus `systemctl --user enable --now driftnote-backup.timer`).
+`make install` runs in order: `check-prereqs` → `scripts` → `build` (`podman build -f Containerfile -t localhost/driftnote:local .`) → `units` (copies the quadlet with `Image=localhost/driftnote:local` substituted in) → `start`.
 
-The default install builds the image locally from the Containerfile in your checkout — no GitHub interaction is needed beyond the initial `git clone` in §3. If you'd rather pull a prebuilt image from GHCR, run `make pull-registry` instead of `make build` (or as a substitute for `make install`'s build step: `make check-prereqs scripts units pull-registry start`). The GHCR package is public; no `podman login` required.
+### Path B: Registry pull
 
-`make pull-registry` defaults to the `:prod` rolling tag — always the latest build that passed CI. To pin to a specific build (e.g. after a regression on `master`), pass `TAG=sha-<short>` from the GHCR package page:
+Pulls the prebuilt image from GHCR. The package is public — no `podman login` required.
 
 ```bash
-make pull-registry TAG=sha-abc1234
-make restart
+make install-registry
 ```
 
-`make pull-registry TAG=prod` returns to the rolling tag.
+Defaults to the `:prod` rolling tag — always the latest build that passed CI. The installed quadlet has `Image=ghcr.io/maciej-makowski/driftnote:prod` so podman pulls updates directly from GHCR on every service start.
+
+To pin to a specific build (e.g. after a regression on master):
+
+```bash
+make install-registry TAG=sha-abc1234
+```
+
+Look up the short SHA on the [GHCR package page](https://github.com/maciej-makowski/driftnote/pkgs/container/driftnote).
+
+### Switching between paths
+
+The two paths produce different quadlets on disk, so switching is a deliberate reinstall:
+
+```bash
+make reinstall-registry         # local → registry (default :prod)
+make reinstall                  # registry → local
+make reinstall-registry TAG=... # pin to / repin
+```
+
+### Day-to-day operations
 
 Run `make help` to see every target. Useful day-to-day:
+
 - `make status` — service + timer status
 - `make logs` — tail `journalctl --user -u driftnote.service`
-- `make build && make restart` — rebuild the image (after editing the Containerfile or pulling new source) and restart
-- `make units && make restart` — after editing a unit file
+- `make pull-registry && make restart` — refresh the registry image (on the registry path) and restart
+- `make build && make restart` — rebuild from source (on the local path) and restart
 - `make uninstall` — stop services and remove installed files (KEEPS data in `~/.driftnote/`)
-- `make reinstall` — `uninstall` + `install`
 
 ### Manual equivalent (if you don't want to use Make)
 
@@ -175,9 +198,9 @@ Run `make help` to see every target. Useful day-to-day:
 install -d ~/.local/lib/driftnote/scripts
 install -m 0755 scripts/backup.sh scripts/alert-email.py ~/.local/lib/driftnote/scripts/
 
-# User-mode quadlet (for the container) + user-mode systemd units (for backup).
+# User-mode quadlet (substitute __IMAGE__ first) + user-mode systemd units.
 install -d ~/.config/containers/systemd ~/.config/systemd/user
-install -m 0644 deploy/driftnote.container              ~/.config/containers/systemd/
+sed 's|__IMAGE__|localhost/driftnote:local|' deploy/driftnote.container > ~/.config/containers/systemd/driftnote.container
 install -m 0644 deploy/driftnote-backup.service         ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup-failure.service ~/.config/systemd/user/
 install -m 0644 deploy/driftnote-backup.timer           ~/.config/systemd/user/
@@ -193,7 +216,12 @@ systemctl --user start driftnote.service
 systemctl --user enable --now driftnote-backup.timer
 ```
 
-(If you prefer pulling from GHCR: `podman pull ghcr.io/maciej-makowski/driftnote:latest && podman tag ghcr.io/maciej-makowski/driftnote:latest localhost/driftnote:local`.)
+For the registry path, replace the `sed` and `podman build` lines with:
+
+```bash
+sed 's|__IMAGE__|ghcr.io/maciej-makowski/driftnote:prod|' deploy/driftnote.container > ~/.config/containers/systemd/driftnote.container
+podman pull ghcr.io/maciej-makowski/driftnote:prod
+```
 
 The `%h` specifier in the shipped unit files expands to your home directory at unit-load time, so the same files work for any user without editing. The quadlet at `~/.config/containers/systemd/driftnote.container` is translated to `driftnote.service` by the user's systemd manager on `daemon-reload`. The backup timer fires on the 1st at 03:00 (your local timezone, since user-mode units default to the user's timezone).
 
@@ -295,7 +323,9 @@ Schedule this via your workstation's cron or Task Scheduler, or run it manually 
 
 ## 7. Update path
 
-To upgrade to a newer release: `git pull` in the repo checkout, rebuild the image, then restart.
+The update flow depends on which install path you're on (see §4).
+
+**Local-build path:** `git pull` in the repo checkout, rebuild, restart.
 
 ```bash
 git pull
@@ -303,7 +333,20 @@ make build && make restart
 journalctl --user -u driftnote.service -n 50   # confirm it came back up cleanly
 ```
 
-(Or, if you're on the GHCR-pull path: `make pull-registry TAG=sha-abc1234 && make restart` — substitute the short SHA of a known-good previous build from the GHCR package page.)
+**Registry-pull path:** the quadlet references `:prod` directly. Pull a fresh image (under the same tag) and restart — no `git pull` required for the deploy itself.
+
+```bash
+make pull-registry && make restart
+journalctl --user -u driftnote.service -n 50
+```
+
+**Rollback** (registry path only): pin to a specific known-good build. Find the short SHA on the [GHCR package page](https://github.com/maciej-makowski/driftnote/pkgs/container/driftnote):
+
+```bash
+make reinstall-registry TAG=sha-abc1234
+```
+
+`make reinstall-registry` (no `TAG=` arg) returns to rolling `:prod`.
 
 If a future release introduces a database schema change, the release notes will include migration instructions. There is no automated migration tooling.
 
