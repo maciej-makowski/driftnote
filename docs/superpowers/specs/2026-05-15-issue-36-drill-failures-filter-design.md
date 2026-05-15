@@ -178,9 +178,18 @@ No production behaviour outside the drill view changes. No DB schema change.
 ### Integration (`tests/integration/test_web_routes_media_and_admin.py`)
 
 1. `test_admin_drill_defaults_to_failures_only` — seed both OK and error rows; GET `/admin/runs/<job>`; assert OK row's timestamp string NOT in body and error row's IS.
-2. `test_admin_drill_show_all_includes_ok_rows` — GET `/admin/runs/<job>?show_only_failed=0&show_only_failed=1` (the unchecked-submit shape `?show_only_failed=0` alone is the precise check; pick the cleaner of the two for the test) and assert OK timestamp IS in body.
+2. `test_admin_drill_show_all_includes_ok_rows` — GET `/admin/runs/<job>?show_only_failed=0` (the unchecked-submit shape — exactly what the form submits when the checkbox is unchecked); assert OK timestamp IS in body.
 3. `test_admin_drill_ack_all_visible_when_failures_outside_visible_window` — seed 200 OK rows and 5 unacked error rows where the errors fall outside the most-recent-100; GET drill; assert "Acknowledge all (5)" button is in body.
 4. `test_admin_drill_filter_form_renders_checkbox_state` — assert the `checked` attribute is present on the checkbox when default; absent when `show_only_failed=0`.
+5. `test_admin_drill_acked_error_in_view_shows_no_per_row_button` — seed one acked error row; with failures-only view (default), assert the row is rendered (acked error is part of the failure history) but no per-row `<button>ack</button>` is present for it. Locks the template's existing `not r.acknowledged_at` guard.
+
+### Existing tests to update
+
+`test_admin_ack_all_button_renders_only_when_two_or_more_unacked` (currently around `tests/integration/test_web_routes_media_and_admin.py:184–204`) asserts the OLD `> 1` threshold (i.e. "with a single unacked row the button must NOT appear"). This test directly contradicts the new `>= 1` threshold and must be rewritten:
+
+- Rename to `test_admin_ack_all_button_renders_when_any_unacked`.
+- Assert the bulk-ack button IS rendered when exactly one unacked failure exists for the job.
+- Add a separate `test_admin_ack_all_button_hidden_when_no_unacked` covering the all-acked-or-no-failures case (button hidden).
 
 ## Acceptance criteria
 
@@ -189,14 +198,15 @@ No production behaviour outside the drill view changes. No DB schema change.
 - [ ] `/admin/runs/<job>` (no query string) renders failures-only view by default.
 - [ ] Toggling the checkbox to unchecked and submitting renders the last-100-of-any-status view.
 - [ ] Bulk-ack button is visible whenever ≥1 unacked failure exists for the job, regardless of which rows are currently visible.
-- [ ] Per-row ack buttons render for each unacked error/warn row that is in the visible set.
-- [ ] All 4 unit tests + 4 integration tests pass.
-- [ ] Existing tests still pass.
+- [ ] Per-row ack buttons render for each unacked error/warn row that is in the visible set; acked rows show timestamp instead of button (template's existing `not r.acknowledged_at` guard).
+- [ ] All 4 unit tests + 5 integration tests pass.
+- [ ] The old `test_admin_ack_all_button_renders_only_when_two_or_more_unacked` is rewritten as `test_admin_ack_all_button_renders_when_any_unacked` + `test_admin_ack_all_button_hidden_when_no_unacked`.
+- [ ] Other existing tests still pass.
 
 ## Risks
 
 **Risk:** The hidden + checkbox pattern relies on FastAPI taking the last value of duplicated query params. If FastAPI's behaviour changes or the user's browser submits the values in a non-document order, the toggle could break.
-**Mitigation:** Verified behaviour on FastAPI 0.115 (the project's pinned version) — last value wins for a `str`-typed query param. The integration test `test_admin_drill_show_all_includes_ok_rows` exercises both the URL-only and form-submit forms.
+**Mitigation:** Verified behaviour on FastAPI 0.136.1 (the lockfile-resolved version): Starlette's `ImmutableMultiDict` stores `_dict = {k: v for k, v in _items}` so a later duplicate overwrites the earlier value; FastAPI's `str`-annotated query params read from that dict, hitting the last value. The integration test exercises the unchecked-submit URL shape `?show_only_failed=0` directly, which is what the form actually emits when the box is unchecked.
 
 **Risk:** Changing the bulk-ack threshold from `> 1` to `>= 1` makes the button visible when only one unacked failure exists. The user might be confused that "Acknowledge all (1)" is shown alongside a per-row ack button doing the same thing.
 **Mitigation:** Acceptable per the user's request ("when there are any unacked errors"). The duplication is mild UX redundancy, not a correctness issue.
