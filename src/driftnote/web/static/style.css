@@ -221,6 +221,12 @@ button:hover { background: var(--accent-hover); }
 .runs tr.status-error td { border-left: 4px solid var(--status-error); }
 .runs tr.status-warn  td { border-left: 4px solid var(--status-warn); }
 .runs tr.status-ok    td { border-left: 4px solid var(--ok); }
+.runs-filter {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
 
 .notice {
   padding: 8px 12px;
