@@ -26,7 +26,7 @@ TAG            ?= prod
 REGISTRY_IMAGE := ghcr.io/maciej-makowski/driftnote:$(TAG)
 
 .DEFAULT_GOAL := help
-.PHONY: help install uninstall reinstall \
+.PHONY: help install install-registry uninstall reinstall reinstall-registry \
         check-prereqs scripts units build pull-registry \
         start stop restart status logs
 
@@ -34,23 +34,25 @@ help:
 	@echo "Driftnote rootless install (assumes you're in a checkout of the repo)."
 	@echo ""
 	@echo "Primary targets:"
-	@echo "  install      End-to-end: verify prereqs, copy scripts + units, build image, enable services."
-	@echo "  uninstall    Stop services and remove installed files. Data in ~/.driftnote/ is KEPT."
-	@echo "  reinstall    uninstall + install (handy after editing deploy/* files)."
+	@echo "  install              End-to-end LOCAL BUILD: build image, install units, start."
+	@echo "  install-registry     End-to-end REGISTRY PULL: pull image, install units, start."
+	@echo "                       Override with TAG=, e.g. 'make install-registry TAG=sha-abc1234'."
+	@echo "  uninstall            Stop services and remove installed files. ~/.driftnote/ KEPT."
+	@echo "  reinstall            uninstall + install (local-build path)."
+	@echo "  reinstall-registry   uninstall + install-registry (registry-pull path)."
 	@echo ""
 	@echo "Operational targets:"
-	@echo "  status       systemctl --user status for service + timer."
-	@echo "  logs         Tail journalctl --user -u driftnote.service."
-	@echo "  restart      systemctl --user restart driftnote.service."
-	@echo "  stop / start Stop or (re-)enable the service + backup timer."
+	@echo "  status               systemctl --user status for service + timer."
+	@echo "  logs                 Tail journalctl --user -u driftnote.service."
+	@echo "  restart              systemctl --user restart driftnote.service."
+	@echo "  stop / start         Stop or (re-)enable the service + backup timer."
 	@echo ""
 	@echo "Component targets (rarely run directly):"
-	@echo "  check-prereqs  Verify ~/.driftnote/{config.toml,driftnote.env} + linger."
-	@echo "  scripts        Copy backup.sh + alert-email.py to ~/.local/lib/driftnote/scripts/."
-	@echo "  units          Copy quadlet + backup units to ~/.config/, daemon-reload."
-	@echo "  build          podman build -f Containerfile -t localhost/driftnote:local . (default)."
-	@echo "  pull-registry  Alternative to build: pull from GHCR + retag. Defaults to :prod;"
-	@echo "                 override with \`make pull-registry TAG=sha-abc1234\`."
+	@echo "  check-prereqs        Verify ~/.driftnote/{config.toml,driftnote.env} + linger."
+	@echo "  scripts              Copy backup.sh + alert-email.py to ~/.local/lib/driftnote/scripts/."
+	@echo "  units                Copy quadlet + backup units. Requires IMAGE=... set by caller."
+	@echo "  build                Build localhost/driftnote:local from Containerfile."
+	@echo "  pull-registry        Pull from GHCR (no retag). TAG=prod default."
 
 check-prereqs:
 	@test -f "$(DATA_DIR)/config.toml" \
@@ -70,26 +72,31 @@ scripts:
 	@install -m 0755 scripts/backup.sh scripts/alert-email.py "$(SCRIPTS_DIR)/"
 	@echo "✓ scripts installed at $(SCRIPTS_DIR)"
 
+# IMAGE must be set by the calling target (install / install-registry / reinstall*).
+# Standalone `make units IMAGE=localhost/driftnote:local` works as an escape hatch
+# when refreshing just the units after editing deploy/*.service files.
 units:
+	@test -n "$(IMAGE)" || { echo "ERROR: IMAGE must be set. Use 'make install', 'make install-registry', or 'make units IMAGE=...'."; exit 1; }
 	@install -d "$(QUADLET_DIR)" "$(USER_UNIT_DIR)"
-	@install -m 0644 deploy/driftnote.container          "$(QUADLET_DIR)/"
-	@install -m 0644 deploy/driftnote-backup.service     "$(USER_UNIT_DIR)/"
+	@sed 's|__IMAGE__|$(IMAGE)|' deploy/driftnote.container > "$(QUADLET_DIR)/driftnote.container"
+	@chmod 0644 "$(QUADLET_DIR)/driftnote.container"
+	@install -m 0644 deploy/driftnote-backup.service         "$(USER_UNIT_DIR)/"
 	@install -m 0644 deploy/driftnote-backup-failure.service "$(USER_UNIT_DIR)/"
-	@install -m 0644 deploy/driftnote-backup.timer       "$(USER_UNIT_DIR)/"
+	@install -m 0644 deploy/driftnote-backup.timer           "$(USER_UNIT_DIR)/"
 	@systemctl --user daemon-reload
-	@echo "✓ units installed; systemd reloaded"
+	@echo "✓ units installed (Image=$(IMAGE)); systemd reloaded"
 
 build:
 	@podman build -f Containerfile -t "$(LOCAL_IMAGE)" .
 	@echo "✓ image built locally as $(LOCAL_IMAGE)"
 
-# Alternative to `build`: pull a prebuilt image from GHCR. The package is
-# public — no `podman login` required. Defaults to the `:prod` rolling tag;
-# pin to a specific build via `make pull-registry TAG=sha-abc1234`.
+# Pull from GHCR. The package is public — no `podman login` required.
+# Defaults to `:prod`; pin via `make pull-registry TAG=sha-abc1234`.
+# No retag — the quadlet references the registry image directly when installed
+# via `make install-registry`.
 pull-registry:
 	@podman pull "$(REGISTRY_IMAGE)"
-	@podman tag "$(REGISTRY_IMAGE)" "$(LOCAL_IMAGE)"
-	@echo "✓ pulled $(REGISTRY_IMAGE) and tagged as $(LOCAL_IMAGE)"
+	@echo "✓ pulled $(REGISTRY_IMAGE)"
 
 start:
 	@# driftnote.service is generated from the quadlet by podman's quadlet
@@ -117,9 +124,17 @@ status:
 logs:
 	@journalctl --user -u driftnote.service -n 50 -f
 
-install: check-prereqs scripts units build start
+install: IMAGE := $(LOCAL_IMAGE)
+install: check-prereqs scripts build units start
 	@echo ""
-	@echo "Driftnote installed. Verify with:"
+	@echo "Driftnote installed (local build, Image=$(LOCAL_IMAGE)). Verify with:"
+	@echo "    make status"
+	@echo "    curl -sf https://driftnote.<your-domain>/healthz   # via Cloudflare Access"
+
+install-registry: IMAGE := $(REGISTRY_IMAGE)
+install-registry: check-prereqs scripts pull-registry units start
+	@echo ""
+	@echo "Driftnote installed (registry pull, Image=$(REGISTRY_IMAGE)). Verify with:"
 	@echo "    make status"
 	@echo "    curl -sf https://driftnote.<your-domain>/healthz   # via Cloudflare Access"
 
@@ -133,3 +148,4 @@ uninstall: stop
 	@echo "✓ uninstalled. $(DATA_DIR)/ KEPT — remove manually with: rm -rf $(DATA_DIR)"
 
 reinstall: uninstall install
+reinstall-registry: uninstall install-registry

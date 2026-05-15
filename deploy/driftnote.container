@@ -6,11 +6,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-# `make install` (or `make build`) builds the image locally from the
-# Containerfile and tags it as localhost/driftnote:local. If you'd rather
-# pull a prebuilt image from GHCR, run `make pull-registry` instead — it
-# tags the GHCR image as the same name so this Image= line stays correct.
-Image=localhost/driftnote:local
+# Image= is filled in by the Makefile when the quadlet is installed.
+# `make install` substitutes `localhost/driftnote:local` (local build).
+# `make install-registry [TAG=...]` substitutes `ghcr.io/maciej-makowski/driftnote:<TAG>`.
+# The repo file's __IMAGE__ placeholder is invalid for direct copy — use the Makefile.
+Image=__IMAGE__
 # Map the host user 1:1 into the container so bind-mounted files in
 # %h/.driftnote/ are readable. Without this, podman puts the container's
 # UID 1000 (the `driftnote` user inside the image) in the subuid range,
