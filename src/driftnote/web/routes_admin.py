@@ -17,6 +17,7 @@ from driftnote.mail.transport import ImapTransport, SmtpTransport
 from driftnote.repository.jobs import (
     acknowledge_all_for_job,
     acknowledge_run,
+    count_unacked_failures_for_job,
     last_run,
     last_successful_run,
     recent_failures,
@@ -120,13 +121,18 @@ def install_admin_routes(
         return rendered
 
     @app.get("/admin/runs/{job}", response_class=HTMLResponse)
-    async def admin_drill(request: Request, job: str, notice: str | None = None) -> HTMLResponse:
+    async def admin_drill(
+        request: Request,
+        job: str,
+        notice: str | None = None,
+        show_only_failed: str = "1",
+    ) -> HTMLResponse:
         now = iso_now()
+        only_failed = show_only_failed != "0"
+        statuses = ["error", "warn"] if only_failed else None
         with session_scope(engine) as session:
-            rows = recent_runs_for_job(session, job, limit=100)
-        unacked_count = sum(
-            1 for r in rows if r.status in ("error", "warn") and r.acknowledged_at is None
-        )
+            rows = recent_runs_for_job(session, job, statuses=statuses, limit=100)
+            unacked_count = count_unacked_failures_for_job(session, job)
         rendered = templates.TemplateResponse(
             request,
             "admin.html.j2",
@@ -136,6 +142,7 @@ def install_admin_routes(
                 "recent_runs": rows,
                 "job_filter": job,
                 "unacked_count": unacked_count,
+                "show_only_failed": only_failed,
                 "dev_mode": environment == "dev",
                 "notice": notice,
             },
