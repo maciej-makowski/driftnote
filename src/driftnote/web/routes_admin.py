@@ -120,6 +120,20 @@ def install_admin_routes(
         rendered.headers["Cache-Control"] = "no-store"
         return rendered
 
+    @app.get("/admin/cards", response_class=HTMLResponse)
+    async def admin_cards(request: Request) -> HTMLResponse:
+        now = iso_now()
+        rendered = templates.TemplateResponse(
+            request,
+            "_admin_cards.html.j2",
+            {"cards": _build_cards(now)},
+        )
+        # The cards partial is the same DB-derived snapshot /admin renders;
+        # it is also what the 30s hx poll swaps in, so it must not be
+        # served stale either (see #23).
+        rendered.headers["Cache-Control"] = "no-store"
+        return rendered
+
     @app.get("/admin/runs/{job}", response_class=HTMLResponse)
     async def admin_drill(
         request: Request,

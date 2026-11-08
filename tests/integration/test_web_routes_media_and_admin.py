@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import jwt
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,6 +13,7 @@ from sqlalchemy import Engine
 
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.repository.jobs import acknowledge_run, finish_job_run, record_job_run
+from driftnote.web.auth import CloudflareAccessAuth, install_cf_access_middleware
 from driftnote.web.routes_admin import install_admin_routes
 from driftnote.web.routes_media import install_media_routes
 
@@ -368,3 +371,114 @@ def test_admin_drill_acked_error_in_view_shows_no_per_row_button(
     assert f'action="/admin/runs/{rid}/ack"' not in r.text
     # Bulk-ack button is also hidden (no unacked failures).
     assert "Acknowledge all" not in r.text
+
+
+# Phase 6 (issue 67): the cards grid becomes a partial polled by /admin,
+# and the htmx include is scoped to its two consumers.
+
+
+def _hs256_token(secret: str, *, aud: str, exp_offset: int = 60) -> str:
+    """Mint a test Access token the same way tests/unit/test_web_auth.py does."""
+    payload = {"aud": aud, "iat": int(time.time()), "exp": int(time.time()) + exp_offset}
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def test_admin_cards_partial_renders_the_cards(setup: tuple[FastAPI, Engine, Path]) -> None:
+    """GET /admin/cards renders the cards-only markup: the same grid /admin
+    embeds, with no page chrome around it."""
+    fapp, eng, _ = setup
+    with session_scope(eng) as session:
+        rid = record_job_run(session, job="imap_poll", started_at="2026-05-06T08:00:00Z")
+        finish_job_run(
+            session,
+            run_id=rid,
+            finished_at="2026-05-06T08:00:01Z",
+            status="ok",
+            detail="ingested 1",
+        )
+    r = TestClient(fapp).get("/admin/cards")
+    assert r.status_code == 200
+    # The partial's root is the cards grid itself: htmx adds .htmx-added to
+    # it on every innerHTML swap, which is the phase-5 settle-fade hook.
+    assert '<section class="job-cards">' in r.text
+    assert "imap_poll" in r.text
+    assert "ingested 1" in r.text
+    assert 'class="dot dot-ok"' in r.text
+    assert f'action="/admin/runs/{rid}/ack"' not in r.text
+    # Cards-only: no page chrome, no polling wrapper, no hx attributes.
+    assert "<html" not in r.text
+    assert 'class="skip-link"' not in r.text
+    assert "hx-" not in r.text
+
+
+def test_admin_cards_partial_carries_no_store(setup: tuple[FastAPI, Engine, Path]) -> None:
+    """The partial is the same DB-derived snapshot /admin renders and what
+    the 30s poll swaps in, so it carries the same no-store header (see #23)."""
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/admin/cards")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_admin_cards_endpoint_auth_gated_like_its_parent(tmp_path: Path) -> None:
+    """The partial passes through the same app JWT middleware as /admin:
+    without the Access header prod answers 403 for both, with a valid token
+    both render. The middleware is global (app.py installs it once over the
+    whole app), so no route carries its own auth code; this test wires the
+    middleware the same way tests/unit/test_web_auth.py does."""
+    eng = make_engine(tmp_path / "data" / "index.sqlite")
+    init_db(eng)
+    fapp = FastAPI()
+    install_admin_routes(
+        fapp, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z", environment="prod"
+    )
+    auth = CloudflareAccessAuth(
+        audience="aud",
+        team_domain="t.example.com",
+        environment="prod",
+        # Test override: validate via a shared HS256 secret so no JWKS
+        # HTTP is needed (the established pattern in test_web_auth.py).
+        signing_keys={"k1": "shared-secret"},
+        algorithms=["HS256"],
+    )
+    install_cf_access_middleware(fapp, auth)
+    client = TestClient(fapp)
+    token = _hs256_token("shared-secret", aud="aud")
+    for path in ("/admin", "/admin/cards"):
+        r = client.get(path)
+        assert r.status_code == 403, f"{path} must be auth-gated in prod"
+        assert r.json()["detail"] == "missing access token"
+        r2 = client.get(path, headers={"Cf-Access-Jwt-Assertion": token})
+        assert r2.status_code == 200, f"{path} renders with a valid Access token"
+
+
+def test_admin_page_embeds_the_cards_wrapper(setup: tuple[FastAPI, Engine, Path]) -> None:
+    """/admin embeds the partial inside the hx polling wrapper with the
+    design's attribute set, and the cards render server-side on first load
+    so the attributes are inert without JS. The drill view shares the
+    template, so it polls the same partial."""
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/admin")
+    assert r.status_code == 200
+    assert 'id="job-cards"' in r.text
+    assert 'hx-get="/admin/cards"' in r.text
+    assert 'hx-trigger="every 30s"' in r.text
+    assert 'hx-target="this"' in r.text
+    assert 'hx-swap="innerHTML"' in r.text
+    # The include's output is present without any JS: the grid section with
+    # all seven cards.
+    assert '<section class="job-cards">' in r.text
+    assert r.text.count('<article class="card">') == 7
+    r2 = TestClient(fapp).get("/admin/runs/imap_poll")
+    assert r2.status_code == 200
+    assert 'hx-get="/admin/cards"' in r2.text
+
+
+def test_admin_page_carries_the_htmx_script(setup: tuple[FastAPI, Engine, Path]) -> None:
+    """The htmx include moved off base.html.j2 in phase 6: admin is one of
+    the two consumers, so its head carries the script in base's exact form."""
+    fapp, _, _ = setup
+    r = TestClient(fapp).get("/admin")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert '<script src="/static/htmx.min.js" defer></script>' in head

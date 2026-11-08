@@ -1,24 +1,27 @@
 {% extends "base.html.j2" %}
 {% block title %}Admin — Driftnote{% endblock %}
+{% block head_extra %}
+  <script src="/static/htmx.min.js" defer></script>
+{% endblock %}
 {% block content %}
 {% if notice %}
   <p class="notice">{{ notice }}</p>
 {% endif %}
 <h1>Admin</h1>
-<section class="job-cards">
-{% for card in cards %}
-  <article class="card">
-    <h2>{{ card.job }}</h2>
-    <p>
-      <span class="dot {{ card.dot_class }}"></span>
-      Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}{% if card.last_detail %} ({{ card.last_detail }}){% endif %}
-    </p>
-    <p>Last success: {{ card.last_success_at or "(never)" }}</p>
-    <p>Failures (30d): {{ card.failures_30d }}</p>
-    <a href="/admin/runs/{{ card.job }}">history</a>
-  </article>
-{% endfor %}
-</section>
+{# Live refresh: this wrapper polls the cards partial every 30s and swaps
+   its innerHTML. innerHTML, not outerHTML, is what keeps the poll alive:
+   htmx starts an "every" poller on elements carrying the hx-* attributes
+   and re-arms it against that element reference each tick, so an
+   outerHTML swap would replace the polling element with the response
+   (which carries no hx-* attributes) and stop after the first cycle.
+   Without JS the attributes are inert and the cards below render once. #}
+<div id="job-cards"
+     hx-get="/admin/cards"
+     hx-trigger="every 30s"
+     hx-target="this"
+     hx-swap="innerHTML">
+{% include "_admin_cards.html.j2" %}
+</div>
 
 {% if dev_mode %}
   <section class="test-controls">
