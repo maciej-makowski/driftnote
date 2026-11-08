@@ -448,3 +448,23 @@ def test_base_chrome_skip_link_head_and_landmark(
         )
     # The skip link's target is the main landmark.
     assert '<main id="content">' in body
+
+
+# Phase 6 (issue 67): the htmx include moved off base.html.j2 onto its two
+# consumers (entry_edit, admin). The four no-JS page types stop loading the
+# 50,917 B file.
+
+
+def test_no_js_page_types_carry_no_htmx_script(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """Calendar, search, tags, and entry render no htmx script: none of
+    them carries an hx-* attribute, and the scoped include keeps the file
+    off every page that does not use it (the design's 3.10 arithmetic)."""
+    app, _ = app_with_data
+    for path in ("/", "/search?q=risotto", "/tags", "/entry/2026-05-06"):
+        r = TestClient(app).get(path)
+        assert r.status_code == 200, path
+        head = r.text.partition("</head>")[0]
+        assert "<script" not in head, f"{path} must render no script tag at all"
+        assert 'src="/static/htmx.min.js"' not in head, f"{path} must not load htmx"

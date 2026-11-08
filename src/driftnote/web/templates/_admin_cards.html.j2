@@ -1,0 +1,19 @@
+{# Cards-only partial for the admin dashboard: the job-card grid exactly as
+   admin.html.j2 renders it, extracted so the hx wrapper on /admin can poll
+   GET /admin/cards and swap the grid in place. The root keeps the
+   .job-cards class: it is the phase-5 settle-fade hook, and htmx adds
+   .htmx-added to the fragment root on each innerHTML swap. #}
+<section class="job-cards">
+{% for card in cards %}
+  <article class="card">
+    <h2>{{ card.job }}</h2>
+    <p>
+      <span class="dot {{ card.dot_class }}"></span>
+      Last: {{ card.last_started_at or "(never)" }} — {{ card.last_status or "—" }}{% if card.last_detail %} ({{ card.last_detail }}){% endif %}
+    </p>
+    <p>Last success: {{ card.last_success_at or "(never)" }}</p>
+    <p>Failures (30d): {{ card.failures_30d }}</p>
+    <a href="/admin/runs/{{ card.job }}">history</a>
+  </article>
+{% endfor %}
+</section>

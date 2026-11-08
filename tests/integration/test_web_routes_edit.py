@@ -198,3 +198,16 @@ def test_entry_detail_after_tag_edit_shows_new_tags_and_no_store(tmp_path: Path)
     assert any(token in cache_control for token in ("no-store", "no-cache", "must-revalidate")), (
         f"expected no-cache directive, got {cache_control!r}"
     )
+
+
+def test_edit_page_carries_the_htmx_script(app: tuple[FastAPI, Engine, Path]) -> None:
+    """The htmx include moved off base.html.j2 in phase 6: the edit page is
+    one of the two consumers (its textarea hx-posts /preview), so its
+    head_extra block now carries the script in base's exact form, beside
+    the phase-5 roman preload."""
+    fapp, _, _ = app
+    r = TestClient(fapp).get("/entry/2026-05-06/edit")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert '<script src="/static/htmx.min.js" defer></script>' in head
+    assert _PRELOAD in head
