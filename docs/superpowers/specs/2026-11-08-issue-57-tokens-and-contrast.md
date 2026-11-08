@@ -156,10 +156,11 @@ uv run python scripts/check-contrast.py src/driftnote/web/static/style.css
 Exits 0 against the phase-1 stylesheet and prints the 24-row table. Exits
 1 against the shipped palette at 34360a4, where the three pad-cell pairs
 resolve --fg-dim #5a5a5a directly on their washes and sit at 2.00:1 to
-2.22:1. (The shipped opacity hack's own effective ratios, 2.51:1 to
-4.03:1 with alpha compositing, belong to W10's shipped table; the phase-1
-pair set models the replacement mechanism, not the removed hack.) The
-asymmetry between the two runs is the proof the gate bites.
+2.22:1. (The shipped opacity hack's own effective ratios, 2.48:1 to
+4.15:1 across its four wash rows, with alpha compositing, belong to W10's
+shipped table; the phase-1 pair set models the replacement mechanism, not
+the removed hack.) The asymmetry between the two runs is the proof the
+gate bites.
 
 ### CI and existing suites
 
