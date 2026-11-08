@@ -466,4 +466,5 @@ def test_no_js_page_types_carry_no_htmx_script(
         r = TestClient(app).get(path)
         assert r.status_code == 200, path
         head = r.text.partition("</head>")[0]
+        assert "<script" not in head, f"{path} must render no script tag at all"
         assert 'src="/static/htmx.min.js"' not in head, f"{path} must not load htmx"

@@ -466,8 +466,13 @@ def test_admin_page_embeds_the_cards_wrapper(setup: tuple[FastAPI, Engine, Path]
     assert 'hx-target="this"' in r.text
     assert 'hx-swap="innerHTML"' in r.text
     # The include's output is present without any JS: the grid section with
-    # all seven cards.
+    # all seven cards, inside the polling wrapper (a misplaced include
+    # outside the wrapper would still pass a page-wide count check).
     assert '<section class="job-cards">' in r.text
+    wrapper_open = r.text.index('<div id="job-cards"')
+    cards_open = r.text.index('<section class="job-cards">', wrapper_open)
+    between = r.text[wrapper_open:cards_open]
+    assert "</div>" not in between, "the wrapper closes before the cards render"
     assert r.text.count('<article class="card">') == 7
     r2 = TestClient(fapp).get("/admin/runs/imap_poll")
     assert r2.status_code == 200
