@@ -31,7 +31,10 @@
   --space-5: 24px;
   --space-6: 32px;
   --ease-settle: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-soft: cubic-bezier(0.25, 0.1, 0.25, 1);
   --dur-fast: 180ms;
+  --dur-med: 300ms;
+  --dur-slow: 600ms;
   --font-serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
 }
 
@@ -206,9 +209,10 @@ main { scroll-margin-top: 12px; }
 .entry .mood { font-size: 26px; }
 
 /* Reading body: the vendored serif first, the system serif stack behind
-   it so a failed or blocked font file falls back at the same size and
-   leading. */
-.entry-body {
+   it so a failed font file falls back at the same size and leading. The
+   edit page's preview shares the list: what you write is what you read. */
+.entry-body,
+.preview {
   font-family: "Newsreader", var(--font-serif);
   font-size: 17px;
   line-height: 1.65;
@@ -268,6 +272,9 @@ main { scroll-margin-top: 12px; }
   border-left: 4px solid var(--accent);
   padding: var(--space-3) var(--space-4);
   margin-top: var(--space-2);
+  /* Reserved for three preview lines at 17px/1.65, so the first
+     keystroke does not shift the page. */
+  min-height: 84px;
 }
 
 /* Buttons */
@@ -360,8 +367,8 @@ button:hover { background: var(--accent-hover); }
 
 /* Motion: hover and focus colour changes settle over --dur-fast on
    --ease-settle. Background and colour only, no transforms, nothing
-   scales or loops. Rows and inputs carry the transition ahead of any
-   hover or focus surface a later phase adds. */
+   scales or loops; the banner entrance below is the one exception (an
+   entrance rise, not a hover). */
 a,
 .tag-chip,
 button,
@@ -374,6 +381,42 @@ button,
   transition:
     background-color var(--dur-fast) var(--ease-settle),
     color var(--dur-fast) var(--ease-settle);
+}
+
+/* htmx settle fade: swapped-in content enters at opacity 0 and fades in
+   over --dur-med. The vendored htmx 2.0.4 inserts each fragment root
+   carrying `htmx-added` and removes the class after the settle delay
+   (20ms), so the transition on the content's settled state animates
+   opacity back to 1. The server-rendered preview never fades (no settle
+   class), and the hooks are classes, not ids: the preview's children,
+   and the job-cards grid the phase-6 partial swaps in. */
+.htmx-added {
+  opacity: 0;
+}
+.preview > *,
+.job-cards {
+  transition: opacity var(--dur-med) var(--ease-soft);
+}
+
+/* Banner entrance: the strip fades in and rises 2px once on page load
+   over --dur-slow on --ease-soft, holds its settled state via forwards,
+   then never moves again. translateY is rigid, so the square left
+   stripes keep their shape. The file's only @keyframes and only
+   transform: the invariant list's recorded exemption, beside the
+   reduced-motion block's. */
+.banners {
+  animation: banner-enter var(--dur-slow) var(--ease-soft) forwards;
+}
+
+@keyframes banner-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
