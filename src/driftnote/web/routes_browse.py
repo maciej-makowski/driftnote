@@ -99,6 +99,10 @@ def install_browse_routes(
             for e in entries
         ]
         cells = monthly_moodboard_grid(year=y, month=m, days=days)
+        # Empty-month hint for the template (issue #61): true when no
+        # in-month cell carries an entry. Pad cells are excluded, since an
+        # entry in the prev/next-month tail is not an entry in this month.
+        month_empty = not any(c.emoji for row in cells for c in row if c.in_month)
         prev_y, prev_m = (y, m - 1) if m > 1 else (y - 1, 12)
         next_y, next_m = (y, m + 1) if m < 12 else (y + 1, 1)
         return _no_store(
@@ -115,6 +119,7 @@ def install_browse_routes(
                     next_year=next_y,
                     next_month=next_m,
                     today_iso=iso_now()[:10],
+                    month_empty=month_empty,
                 ),
             )
         )

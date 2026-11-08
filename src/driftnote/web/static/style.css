@@ -19,6 +19,21 @@
   --cal-today-empty:  #3a2e1f;
 }
 
+/* Geometry and motion tokens sit in a second :root block so the first
+   stays byte-identical: the phase-1 contrast test parses the first block
+   and pins its token set exactly. CSS merges the two blocks. */
+:root {
+  --radius-m: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --ease-settle: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 180ms;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -26,14 +41,14 @@ body {
   background: var(--bg);
   color: var(--fg);
   margin: 0 auto;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   max-width: 960px;
   font-size: 15px;
   line-height: 1.5;
 }
 
-h1 { font-size: 24px; font-weight: 600; margin: 16px 0 12px; }
-h2 { font-size: 18px; font-weight: 600; margin: 16px 0 8px; }
+h1 { font-size: 24px; font-weight: 600; margin: var(--space-4) 0 var(--space-3); }
+h2 { font-size: 18px; font-weight: 600; margin: var(--space-4) 0 var(--space-2); }
 h3 { font-size: 16px; font-weight: 600; margin: 12px 0 6px; }
 
 a { color: var(--accent); text-decoration: none; }
@@ -48,17 +63,17 @@ a:hover { color: var(--accent-hover); }
 .topbar {
   display: flex;
   justify-content: space-between;
-  padding: 12px 0;
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--border);
 }
-.topbar nav a { margin-left: 16px; color: var(--fg-muted); }
+.topbar nav a { margin-left: var(--space-4); color: var(--fg-muted); }
 .topbar nav a:hover { color: var(--accent); }
 .brand { font-weight: 700; color: var(--fg); }
 .brand:hover { color: var(--fg); }
 
 /* Banners */
-.banners { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
-.banner { padding: 8px 12px; }
+.banners { display: flex; flex-direction: column; gap: 6px; margin: var(--space-3) 0; }
+.banner { padding: var(--space-2) var(--space-3); }
 .banner-warn  { background: var(--warn-bg);  color: var(--warn-fg);  border-left: 4px solid var(--warn-fg); }
 .banner-error { background: var(--error-bg); color: var(--error-fg); border-left: 4px solid var(--error-fg); }
 
@@ -69,7 +84,7 @@ a:hover { color: var(--accent-hover); }
   top: 12px;
   left: -9999px;
   z-index: 10;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-raised);
   color: var(--accent);
 }
@@ -79,7 +94,7 @@ a:hover { color: var(--accent-hover); }
 main { scroll-margin-top: 12px; }
 
 /* Calendar */
-.month-nav { display: flex; gap: 16px; margin: 8px 0 12px; }
+.month-nav { display: flex; gap: var(--space-4); margin: var(--space-2) 0 var(--space-3); }
 .calendar {
   width: 100%;
   border-collapse: separate;
@@ -87,10 +102,11 @@ main { scroll-margin-top: 12px; }
   table-layout: fixed;
 }
 .calendar th, .calendar td {
-  padding: 4px;
+  padding: var(--space-1);
   text-align: center;
   height: 56px;
 }
+.calendar td { border-radius: var(--radius-m); }
 .calendar th { color: var(--fg-muted); font-weight: 500; font-size: 13px; }
 .calendar td a { color: var(--fg); display: block; }
 .calendar td.dim a, .calendar td.dim .dom { color: var(--fg-dim); }
@@ -102,10 +118,13 @@ main { scroll-margin-top: 12px; }
 .calendar .emoji { font-size: 20px; }
 .calendar .dom { font-size: 11px; color: var(--fg-muted); }
 
+/* Empty month: one quiet line under the table pointing at the mail poll */
+.calendar-empty { color: var(--fg-muted); font-size: 13px; margin: var(--space-2) 0; }
+
 /* Tag cloud canvas (desktop): absolutely-positioned chips on a 600x400 area */
 .tag-cloud-canvas {
   position: relative;
-  margin: 16px auto;
+  margin: var(--space-4) auto;
   background: var(--bg-raised);
 }
 .tag-cloud-canvas .cloud-chip {
@@ -115,7 +134,7 @@ main { scroll-margin-top: 12px; }
 }
 
 /* Flat tag list — used as the mobile fallback */
-.tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-cloud { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
 @media (max-width: 600px) {
   .tag-cloud-canvas { display: none; }
@@ -128,7 +147,9 @@ main { scroll-margin-top: 12px; }
 .tag-chip {
   background: var(--bg-raised);
   color: var(--fg-muted);
+  /* cloud.py's bounding-box maths assume this padding; do not change it */
   padding: 2px 8px;
+  border-radius: var(--radius-m);
   font-size: 13px;
   margin-right: 6px;
 }
@@ -137,25 +158,27 @@ main { scroll-margin-top: 12px; }
 /* Entry view */
 .entry {
   border-left: 4px solid var(--accent);
-  padding: 4px 0 4px 16px;
+  padding: var(--space-1) 0 var(--space-1) var(--space-4);
 }
 .entry .mood { font-size: 26px; }
-.entry .media img { max-width: 240px; margin: 4px; }
+.entry .media img { max-width: 240px; margin: var(--space-1); }
 .entry .media video { max-width: 100%; }
 
 /* Edit view */
-.entry-edit label { display: block; margin: 8px 0 4px; color: var(--fg-muted); font-size: 13px; }
+.entry-edit label { display: block; margin: var(--space-2) 0 var(--space-1); color: var(--fg-muted); font-size: 13px; }
 .entry-edit input[type="text"], .entry-edit input:not([type]) {
   background: var(--bg-raised);
   color: var(--fg);
-  border: 1px solid var(--border);
+  border: none;
+  border-radius: var(--radius-m);
   padding: 6px 10px;
   width: 100%;
 }
 .entry-edit textarea {
   background: var(--bg-raised);
   color: var(--fg);
-  border: 1px solid var(--border);
+  border: none;
+  border-radius: var(--radius-m);
   padding: 8px 10px;
   font-family: ui-monospace, Menlo, monospace;
   font-size: 14px;
@@ -163,8 +186,8 @@ main { scroll-margin-top: 12px; }
 .entry-edit .preview {
   background: var(--bg);
   border-left: 4px solid var(--accent);
-  padding: 12px 16px;
-  margin-top: 8px;
+  padding: var(--space-3) var(--space-4);
+  margin-top: var(--space-2);
 }
 
 /* Buttons */
@@ -172,7 +195,8 @@ button, .entry-edit button {
   background: var(--accent);
   color: var(--bg);
   border: none;
-  padding: 8px 16px;
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-4);
   font: inherit;
   cursor: pointer;
 }
@@ -182,7 +206,8 @@ button:hover { background: var(--accent-hover); }
 .search-form input[type="search"] {
   background: var(--bg-raised);
   color: var(--fg);
-  border: 1px solid var(--border);
+  border: none;
+  border-radius: var(--radius-m);
   padding: 6px 10px;
   width: 100%;
   max-width: 400px;
@@ -190,7 +215,8 @@ button:hover { background: var(--accent-hover); }
 .search-results { list-style: none; padding: 0; }
 .search-results li {
   background: var(--bg-raised);
-  padding: 8px 12px;
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-3);
   margin: 6px 0;
 }
 
@@ -198,12 +224,13 @@ button:hover { background: var(--accent-hover); }
 .job-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-  margin: 12px 0;
+  gap: var(--space-3);
+  margin: var(--space-3) 0;
 }
 .job-cards .card {
   background: var(--bg-raised);
-  padding: 12px 16px;
+  border-radius: var(--radius-m);
+  padding: var(--space-3) var(--space-4);
 }
 .job-cards .card h2 { margin-top: 0; font-size: 16px; }
 .job-cards .card p { margin: 4px 0; font-size: 14px; }
@@ -221,17 +248,17 @@ button:hover { background: var(--accent-hover); }
 .dot-error { background: var(--status-error); }
 
 .test-controls {
-  margin-top: 24px;
-  padding: 12px;
+  margin-top: var(--space-5);
+  padding: var(--space-3);
   border: 2px dashed var(--warn-fg);
   background: var(--warn-bg);
   color: var(--fg);
 }
 .test-controls h2 { margin-top: 0; }
-.test-controls .hint { color: var(--fg-muted); margin: 4px 0 12px; font-size: 13px; }
-.test-controls form { display: inline-block; margin: 4px; }
+.test-controls .hint { color: var(--fg-muted); margin: var(--space-1) 0 var(--space-3); font-size: 13px; }
+.test-controls form { display: inline-block; margin: var(--space-1); }
 
-.runs { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.runs { width: 100%; border-collapse: collapse; margin-top: var(--space-3); }
 .runs th, .runs td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
 .runs th { color: var(--fg-muted); font-weight: 500; }
 .runs tr.status-error td { border-left: 4px solid var(--status-error); }
@@ -239,16 +266,42 @@ button:hover { background: var(--accent-hover); }
 .runs tr.status-ok    td { border-left: 4px solid var(--ok); }
 .runs-filter {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
-  margin: 8px 0;
+  margin: var(--space-2) 0;
 }
 
 .notice {
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-raised);
   border-left: 4px solid var(--ok);
-  margin: 8px 0;
+  margin: var(--space-2) 0;
+}
+
+/* Motion: hover and focus colour changes settle over --dur-fast on
+   --ease-settle. Background and colour only, no transforms, nothing
+   scales or loops. Rows and inputs carry the transition ahead of any
+   hover or focus surface a later phase adds. */
+a,
+.tag-chip,
+button,
+.calendar td,
+.search-results li,
+.entry-edit input[type="text"],
+.entry-edit input:not([type]),
+.entry-edit textarea,
+.search-form input[type="search"] {
+  transition:
+    background-color var(--dur-fast) var(--ease-settle),
+    color var(--dur-fast) var(--ease-settle);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Mobile: shrink the calendar so it fits a 360px viewport */
