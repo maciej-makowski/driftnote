@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date as _date
 from pathlib import Path
 
@@ -64,15 +65,35 @@ def test_edit_form_renders(app: tuple[FastAPI, Engine, Path]) -> None:
     assert "initial body" in r.text
 
 
-def test_edit_page_defers_roman_preload(app: tuple[FastAPI, Engine, Path]) -> None:
-    """The edit page carries no preload this phase: nothing on it renders the
-    serif face yet (the preview gains the serif styling in phase 5, and the
-    preload joins then to avoid a preloaded-but-unused console warning)."""
+_PRELOAD = (
+    '<link rel="preload" href="/static/fonts/newsreader-400.woff2"'
+    ' as="font" type="font/woff2" crossorigin>'
+)
+
+
+def test_edit_page_preloads_roman_face(app: tuple[FastAPI, Engine, Path]) -> None:
+    """The edit page preloads the roman face via the head_extra block: the
+    preview panel renders the serif since phase 5, so the face has a
+    consumer here (phase 4 deliberately left the block empty to avoid a
+    preloaded-but-unused console warning)."""
     fapp, _, _ = app
     r = TestClient(fapp).get("/entry/2026-05-06/edit")
     assert r.status_code == 200
     head = r.text.partition("</head>")[0]
-    assert "newsreader-400.woff2" not in head
+    assert _PRELOAD in head
+    # Only the roman face preloads: italic and latin-ext fetch on demand
+    # through unicode-range, exactly like the entry page.
+    assert "newsreader-400-italic" not in head
+    assert "latin-ext" not in head
+
+
+def test_edit_page_mood_input_names_itself(app: tuple[FastAPI, Engine, Path]) -> None:
+    """The mood input carries the design's aria-label for screen readers;
+    the wrapped label stays for sighted users."""
+    fapp, _, _ = app
+    r = TestClient(fapp).get("/entry/2026-05-06/edit")
+    assert r.status_code == 200
+    assert re.search(r'<input name="mood"[^>]*aria-label="Mood, one emoji"', r.text)
 
 
 def test_edit_post_updates_entry_md_and_db(app: tuple[FastAPI, Engine, Path]) -> None:
