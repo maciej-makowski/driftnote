@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -214,3 +215,53 @@ def test_search_results_render_tag_chips_per_hit(
     assert 'class="tag-chip"' in r.text
     assert 'href="/?tag=work"' in r.text
     assert 'href="/?tag=cooking"' in r.text
+
+
+def test_base_chrome_skip_link_head_and_landmark(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """The base template carries the phase-2 chrome: the skip link is the
+    first focusable element, main is its target, and the head declares the
+    dark colour scheme, the canvas theme colour, and the inline SVG favicon."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/")
+    assert r.status_code == 200
+    head, sep, body = r.text.partition("</head>")
+    assert sep, "page must carry a head section"
+    assert '<meta name="color-scheme" content="dark">' in head
+    assert '<meta name="theme-color" content="#201b26">' in head
+    icon = re.search(r'<link rel="icon" href="data:image/svg\+xml,[^"]*"', head)
+    assert icon is not None
+    assert len(icon.group(0)) < 1024
+    # The favicon payload must be a well-formed SVG, not merely a short
+    # data URI. Structural check instead of an XML parser: the payload is
+    # the app's own static template text (bounded, not external input), and
+    # an XML parser would add XXE-hardening caveats the repo does not need
+    # a new dependency for. No DOCTYPE or entity declarations are allowed,
+    # which is the construct that matters if the input were untrusted.
+    href = icon.group(0).split('href="', 1)[1].rsplit('"', 1)[0]
+    svg = urllib.parse.unquote(href.split(",", 1)[1])
+    stripped = svg.lstrip()
+    assert stripped.startswith("<svg"), "favicon payload must start with the svg root"
+    assert svg.count("<svg") == 1 and "</svg>" in svg
+    assert "<!" not in svg, "favicon payload must not carry DOCTYPE or entity declarations"
+    # The skip link is the first focusable element: nothing tabbable sits
+    # between the opening body tag and the skip link. Anchors are matched
+    # on their tag boundary so <article> cannot satisfy <a, and explicit
+    # tabindex attributes count as tabbable too.
+    body_start = body.index("<body>") + len("<body>")
+    skip_start = body.index('<a class="skip-link" href="#content">')
+    region = body[body_start:skip_start]
+    for pattern in (
+        r"<a[\s>]",
+        r"<button[\s>]",
+        r"<input[\s>]",
+        r"<textarea[\s>]",
+        r"<select[\s>]",
+        r"tabindex=",
+    ):
+        assert re.search(pattern, region) is None, (
+            f"tabbable element before the skip link: {pattern}"
+        )
+    # The skip link's target is the main landmark.
+    assert '<main id="content">' in body
