@@ -42,6 +42,27 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 # `/static/*` is unaffected and remains CDN-friendly.
 _NO_STORE = "no-store"
 
+# Weekday names for the entry heading (issue 63): a static English mapping
+# applied to the parsed date, not locale-dependent strftime, so the heading
+# is deterministic regardless of the container's locale.
+_WEEKDAY_NAMES = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+
+
+def _weekday_name(date_str: str) -> str:
+    """Weekday name for an ISO date string; empty string if unparseable."""
+    try:
+        return _WEEKDAY_NAMES[_date.fromisoformat(date_str).weekday()]
+    except ValueError:
+        return ""
+
 
 def _no_store(response: HTMLResponse) -> HTMLResponse:
     response.headers["Cache-Control"] = _NO_STORE
@@ -55,6 +76,9 @@ def install_browse_routes(
     iso_now: Callable[[], str],
 ) -> None:
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # The entry heading renders the weekday next to the ISO date (issue 63);
+    # entry.date is a plain string, so the template gets it via this filter.
+    templates.env.filters["weekday"] = _weekday_name
 
     def _ctx(**extras: object) -> dict[str, object]:
         return {"banners": compute_banners(engine, now=iso_now()), **extras}

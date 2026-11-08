@@ -1,5 +1,8 @@
 {% extends "base.html.j2" %}
 {% block title %}Edit {{ entry.date }} — Driftnote{% endblock %}
+{% block head_extra %}
+  <link rel="preload" href="/static/fonts/newsreader-400.woff2" as="font" type="font/woff2" crossorigin>
+{% endblock %}
 {% block content %}
 <form method="post" action="/entry/{{ entry.date }}" class="entry-edit">
   <h1>Edit {{ entry.date }}</h1>

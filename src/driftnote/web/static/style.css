@@ -32,6 +32,7 @@
   --space-6: 32px;
   --ease-settle: cubic-bezier(0.22, 0.61, 0.36, 1);
   --dur-fast: 180ms;
+  --font-serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
 }
 
 * { box-sizing: border-box; }
@@ -155,14 +156,93 @@ main { scroll-margin-top: 12px; }
 }
 .tag-chip:hover { background: var(--bg-hover); color: var(--accent); }
 
+/* Vendored serif: Newsreader 400 (roman + italic), latin and latin-ext
+   subsets, one file per subset and style. unicode-range keeps each file
+   unfetched until one of its codepoints actually renders, so an entry
+   without diacritics never downloads the latin-ext files. font-display:
+   swap keeps system-serif text visible while a file loads. The family
+   name here must match the font-family list on .entry-body below. */
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/newsreader-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Newsreader";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/newsreader-400-italic.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/newsreader-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Newsreader";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/newsreader-400-italic-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 /* Entry view */
 .entry {
   border-left: 4px solid var(--accent);
   padding: var(--space-1) 0 var(--space-1) var(--space-4);
 }
+.entry .back { margin: 0; }
+.entry .back a { color: var(--fg-muted); font-size: 13px; }
+.entry .back a:hover { color: var(--accent); }
 .entry .mood { font-size: 26px; }
-.entry .media img { max-width: 240px; margin: var(--space-1); }
-.entry .media video { max-width: 100%; }
+
+/* Reading body: the vendored serif first, the system serif stack behind
+   it so a failed or blocked font file falls back at the same size and
+   leading. */
+.entry-body {
+  font-family: "Newsreader", var(--font-serif);
+  font-size: 17px;
+  line-height: 1.65;
+  max-width: 62ch;
+}
+
+/* Media grid: photos tile as 160px squares, cropped by object-fit so the
+   layout never shifts; videos keep document flow and gain the radius. */
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 160px);
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+.entry .media img {
+  width: 160px;
+  height: 160px;
+  object-fit: cover;
+  border-radius: var(--radius-m);
+  display: block;
+}
+.entry .media video { max-width: 100%; border-radius: var(--radius-m); }
+
+/* Quiet edit button: raised fill, not the accent Save button */
+.entry-actions { margin: var(--space-3) 0 0; }
+.entry-actions a {
+  display: inline-block;
+  background: var(--bg-raised);
+  color: var(--fg);
+  border-radius: var(--radius-m);
+  padding: var(--space-2) var(--space-4);
+  font-size: 13px;
+}
+.entry-actions a:hover { background: var(--bg-hover); color: var(--fg); }
 
 /* Edit view */
 .entry-edit label { display: block; margin: var(--space-2) 0 var(--space-1); color: var(--fg-muted); font-size: 13px; }

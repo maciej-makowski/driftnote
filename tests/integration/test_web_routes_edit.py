@@ -64,6 +64,19 @@ def test_edit_form_renders(app: tuple[FastAPI, Engine, Path]) -> None:
     assert "initial body" in r.text
 
 
+def test_edit_page_preloads_roman_font(app: tuple[FastAPI, Engine, Path]) -> None:
+    """The edit page renders the preview panel over the serif reading body,
+    so it preloads the roman face like the entry page does (issue 63)."""
+    fapp, _, _ = app
+    r = TestClient(fapp).get("/entry/2026-05-06/edit")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert (
+        '<link rel="preload" href="/static/fonts/newsreader-400.woff2"'
+        ' as="font" type="font/woff2" crossorigin>' in head
+    )
+
+
 def test_edit_post_updates_entry_md_and_db(app: tuple[FastAPI, Engine, Path]) -> None:
     fapp, eng, data_root = app
     r = TestClient(fapp, follow_redirects=False).post(
