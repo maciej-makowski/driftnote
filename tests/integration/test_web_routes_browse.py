@@ -129,7 +129,7 @@ def test_calendar_page_renders_pad_cell_day_numbers(
     # Pad cells get a `dim` class plus a state class. Day-of-month sits in
     # a <div class="dom"> just like in-month cells.
     pad_doms = re.findall(
-        r'<td class="dim[^"]*">\s*<a href="/entry/[^"]+">\s*<div class="dom">(\d+)</div>',
+        r'<td class="dim[^"]*">\s*<a href="/entry/[^"]+"[^>]*>\s*<div class="dom">(\d+)</div>',
         r.text,
     )
     assert "27" in pad_doms
@@ -174,9 +174,76 @@ def test_calendar_pad_cell_with_entry_renders_mood(tmp_path: Path) -> None:
     assert r.status_code == 200
     # The April 30 pad cell must carry the has-entry state and the mood emoji.
     assert re.search(
-        r'<td class="dim has-entry">\s*<a href="/entry/2026-04-30">\s*<div class="dom">30</div>\s*<div class="emoji">🌧️</div>',
+        r'<td class="dim has-entry">\s*<a href="/entry/2026-04-30"[^>]*>\s*<div class="dom">30</div>\s*<div class="emoji">🌧️</div>',
         r.text,
     )
+
+
+def test_calendar_cell_links_carry_full_date_aria_labels(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """Every calendar cell link names its full date for screen readers: the
+    visible text is only the day number and a mood emoji, so the accessible
+    name must carry the ISO date instead."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    labelled = re.findall(r'<a href="/entry/(\d{4}-\d{2}-\d{2})" aria-label="([^"]+)">', r.text)
+    assert labelled, "calendar cell links must carry aria-labels"
+    # Each label is the cell's own full date, pad cells included.
+    assert all(date == label for date, label in labelled)
+    assert len(labelled) == 42  # six rows of seven cells, all linked
+    assert ("2026-05-06", "2026-05-06") in labelled
+
+
+def test_calendar_empty_month_line_renders_for_empty_month(tmp_path: Path) -> None:
+    """A month with no entries at all renders the quiet hint line pointing
+    at the imap_poll drill, the likely cause of a silently empty month."""
+    eng = make_engine(tmp_path / "empty.sqlite")
+    init_db(eng)
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-15T12:00:00Z")
+    install_static(app)
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    assert "No entries this month." in r.text
+    assert 'href="/admin/runs/imap_poll"' in r.text
+
+
+def test_calendar_empty_month_line_absent_when_month_has_entries(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """The hint is for fully empty months only: the fixture seeds one May entry."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    assert "No entries this month." not in r.text
+    assert "calendar-empty" not in r.text
+
+
+def test_calendar_empty_month_line_ignores_pad_cell_entries(tmp_path: Path) -> None:
+    """An entry in the prev-month pad tail does not make the viewed month
+    non-empty: the hint keys on in-month cells (issue #61)."""
+    eng = make_engine(tmp_path / "pad.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-04-30",
+                mood="🌧️",
+                body_text="april rain",
+                body_md="rain",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    install_static(app)
+    r = TestClient(app).get("/?year=2026&month=5")
+    assert r.status_code == 200
+    assert "No entries this month." in r.text
 
 
 def test_entry_page_escapes_script_tags(tmp_path: Path) -> None:

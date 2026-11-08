@@ -23,7 +23,7 @@
           {%- set td_class = state -%}
         {%- endif %}
         <td class="{{ td_class }}">
-          <a href="/entry/{{ c.date.isoformat() }}">
+          <a href="/entry/{{ c.date.isoformat() }}" aria-label="{{ c.date.isoformat() }}">
             <div class="dom">{{ c.day_of_month }}</div>
             <div class="emoji">{{ c.emoji or "·" }}</div>
           </a>
@@ -33,4 +33,7 @@
     {% endfor %}
   </tbody>
 </table>
+{% if month_empty %}
+<p class="calendar-empty">No entries this month. <a href="/admin/runs/imap_poll">Check the mail poll</a></p>
+{% endif %}
 {% endblock %}
