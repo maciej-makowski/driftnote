@@ -27,9 +27,9 @@ phase 4, M3).
   the `.entry-body` wrapper, the media grid, thumb alt text, lazy loading,
   explicit thumb dimensions, and the quiet edit link.
 - `src/driftnote/web/templates/base.html.j2`: an empty `head_extra` block in
-  `<head>`, filled by the two serif pages.
-- `src/driftnote/web/templates/entry_edit.html.j2`: the preload link for the
-  roman face, nothing else.
+  `<head>`, filled by the serif pages that need it.
+- `src/driftnote/web/templates/entry_edit.html.j2`: no change this phase
+  (the edit page renders no serif face yet; its preload joins in phase 5).
 - `src/driftnote/web/templates/search.html.j2`: the input's `aria-label` and
   the heading structure on result rows. The em-dash separator stays verbatim.
 - `src/driftnote/web/routes_browse.py`: the weekday Jinja filter, registered
@@ -48,10 +48,11 @@ phase 4, M3).
 
 **Out:**
 - The preview panel's serif styling and the rest of the entry-edit polish
-  (min-height on `#preview`, the mood input's `aria-label`): phase 5. The
-  edit page preloads the roman face from this phase on, per the doc's
-  phase-4 file list, so the wiring is in place when the preview inherits the
-  serif.
+  (min-height on `#preview`, the mood input's `aria-label`, the roman-face
+  preload on the edit page): phase 5. The preload deliberately waits:
+  nothing on the edit page consumes the face until the preview inherits
+  the serif, so preloading now would fetch bytes no rule renders and log a
+  preloaded-but-unused warning.
 - The banner entrance animation, the preview and admin settle fades, and the
   `--ease-soft`, `--dur-med`, `--dur-slow` tokens: phase 5.
 - The admin cards partial, the 30s refresh, and the htmx include move: phase
@@ -219,7 +220,7 @@ cached afterwards.
 | Page | Steady state | With italic text | With latin-ext glyphs | Worst case |
 |---|---|---|---|---|
 | entry | 4 (HTML, CSS, htmx JS, roman) | 5 | +1 per ext file used | 7 (HTML, CSS, JS, four faces) |
-| entry_edit | 4 (HTML, CSS, htmx JS, roman) | 5 | +1 per ext file used | 7 |
+| entry_edit | 3 (HTML, CSS, htmx JS; no face this phase) | 3 | 3 | 3 (faces join in phase 5) |
 | calendar, search, tags | 3 (HTML, CSS, htmx JS) | 3 | 3 | 3 |
 | admin | 3 (HTML, CSS, htmx JS) | 3 | 3 | 3 |
 | favicon | 0 | 0 | 0 | 0 |
@@ -318,8 +319,8 @@ local setup that seeds media rows:
 - `test_search_results_render_date_link_as_row_heading`: the hit's heading
   is the date and mood link, and the em-dash still separates link from
   excerpt.
-- `test_edit_page_preloads_roman_font` (edit file): the edit page head
-  preloads the roman face.
+- `test_edit_page_defers_roman_preload` (edit file): the edit page head
+  carries no preload this phase; it joins in phase 5 with the preview serif.
 
 ### Existing suites and gates
 
@@ -354,9 +355,9 @@ local setup that seeds media rows:
 - [ ] Every `@font-face` rule carries `font-display: swap`, the italic
       files carry `font-style: italic`, and each rule carries its subset's
       `unicode-range`.
-- [ ] Only entry and entry_edit preload the roman face, via the
-      `head_extra` block; base.html.j2 preloads nothing; the other four
-      page types fetch no font file.
+- [ ] Only entry preloads the roman face this phase, via the `head_extra`
+      block (the edit page joins in phase 5); base.html.j2 preloads nothing;
+      the other five page types fetch no font file.
 - [ ] The search input carries `aria-label="Search query"`; result rows
       carry the date-and-mood link as an h2 heading; the em-dash separator
       stays.
