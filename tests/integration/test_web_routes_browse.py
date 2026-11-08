@@ -214,3 +214,29 @@ def test_search_results_render_tag_chips_per_hit(
     assert 'class="tag-chip"' in r.text
     assert 'href="/?tag=work"' in r.text
     assert 'href="/?tag=cooking"' in r.text
+
+
+def test_base_chrome_skip_link_head_and_landmark(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """The base template carries the phase-2 chrome: the skip link is the
+    first focusable element, main is its target, and the head declares the
+    dark colour scheme, the canvas theme colour, and the inline SVG favicon."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/")
+    assert r.status_code == 200
+    head, sep, body = r.text.partition("</head>")
+    assert sep, "page must carry a head section"
+    assert '<meta name="color-scheme" content="dark">' in head
+    assert '<meta name="theme-color" content="#201b26">' in head
+    icon = re.search(r'<link rel="icon" href="data:image/svg\+xml,[^"]*"', head)
+    assert icon is not None
+    assert len(icon.group(0)) < 1024
+    # The skip link is the first focusable element: nothing tabbable sits
+    # between the opening body tag and the skip link.
+    body_start = body.index("<body>") + len("<body>")
+    skip_start = body.index('<a class="skip-link" href="#content">')
+    for tag in ("<a", "<button", "<input", "<textarea", "<select"):
+        assert tag not in body[body_start:skip_start]
+    # The skip link's target is the main landmark.
+    assert '<main id="content">' in body
