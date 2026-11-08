@@ -117,6 +117,8 @@ PAIRS: tuple[Pair, ...] = (
     Pair("pad cell text on hover wash (td:hover)", "--fg-dim", "--bg-hover", AA_TEXT),
     Pair("links", "--accent", "--bg", AA_TEXT),
     Pair("link hover", "--accent-hover", "--bg", AA_TEXT),
+    Pair("skip link on focus", "--accent", "--bg-raised", AA_TEXT),
+    Pair("skip link on focus hover", "--accent-hover", "--bg-raised", AA_TEXT),
     Pair("button text", "--bg", "--accent", AA_TEXT),
     Pair("button text on hover", "--bg", "--accent-hover", AA_TEXT),
     Pair("warn banner text", "--warn-fg", "--warn-bg", AA_TEXT),

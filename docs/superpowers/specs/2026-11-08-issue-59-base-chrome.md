@@ -30,8 +30,9 @@ this phase.
 
 **Out:**
 - Every other stylesheet line. The :root block is byte-identical to master;
-  phase 2 adds no colours, so the phase-1 contrast gate needs no pair set
-  change.
+  phase 2 adds no colours, but the skip link's visible state is a new
+  surface, so the contrast gate's pair set gains its two rows (the phase-1
+  standing rule: pair-set updates ride the PR adding the surface).
 - Every other template, every route, auth, the email digest palette.
 - `pyproject.toml` and `uv.lock`: zero new dependencies.
 - A tabindex on main: the design doc's template change list is "give main
@@ -177,9 +178,10 @@ No new fixtures, no new test architecture: it uses the file's existing
 - `uv run ruff check src tests`, `uv run ruff format --check src tests`,
   `uv run mypy`: clean.
 - `uv run python scripts/check-contrast.py
-  src/driftnote/web/static/style.css`: still exits 0 and prints the same
-  24-row table. Phase 2 adds no colours; the phase-1 pair set needs no
-  change.
+  src/driftnote/web/static/style.css`: still exits 0 and prints a 26-row
+  table. The two skip-link rows join the pair set in this PR (accent on
+  bg-raised 7.37:1, accent-hover on bg-raised 9.47:1, both AA); no colour
+  value changes.
 
 ## Acceptance criteria
 
