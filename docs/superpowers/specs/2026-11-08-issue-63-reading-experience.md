@@ -193,8 +193,10 @@ shadows, no gradients, no keyframes, no transforms. `unicode-range` writes
 
 `base.html.j2` gains an empty `{% block head_extra %}{% endblock %}` inside
 `<head>`, right after the stylesheet link. Nothing in the base template
-references a font. `entry.html.j2` and `entry_edit.html.j2` fill the block
-with one link:
+references a font. `entry.html.j2` fills the block now; `entry_edit.html.j2`
+joins in phase 5, when the preview panel gains the serif — preloading now
+would fetch a face nothing on that page consumes and log a
+preloaded-but-unused warning. The link both templates will carry:
 
 ```html
 <link rel="preload" href="/static/fonts/newsreader-400.woff2" as="font" type="font/woff2" crossorigin>
@@ -216,14 +218,15 @@ cached afterwards.
 
 | Page | Steady state | With italic text | With latin-ext glyphs | Worst case |
 |---|---|---|---|---|
-| entry | 3 (HTML, CSS, roman) | 4 | +1 per ext file used | 6 (HTML, CSS, four faces) |
-| entry_edit | 4 (adds JS) | 5 | +1 per ext file used | 7 |
-| calendar, search, tags | 2 (HTML, CSS) | 2 | 2 | 2 |
-| admin | 3 (adds JS) | 3 | 3 | 3 |
+| entry | 4 (HTML, CSS, htmx JS, roman) | 5 | +1 per ext file used | 7 (HTML, CSS, JS, four faces) |
+| entry_edit | 4 (HTML, CSS, htmx JS, roman) | 5 | +1 per ext file used | 7 |
+| calendar, search, tags | 3 (HTML, CSS, htmx JS) | 3 | 3 | 3 |
+| admin | 3 (HTML, CSS, htmx JS) | 3 | 3 | 3 |
 | favicon | 0 | 0 | 0 | 0 |
 
-A first visit to calendar, search, or tags still pays the global htmx
-include (one more request) until phase 6 moves it to the two consumers.
+Every page still pays the global htmx include (counted above) until phase 6
+scopes it to the two consumers; the design's section 3.10 row describes that
+post-phase-6 end state, not this phase's.
 
 ### Entry page and search page markup
 
@@ -267,7 +270,7 @@ phase changes their structure only.
 |---|---|
 | `src/driftnote/web/templates/entry.html.j2` | Back link, weekday h1, `.entry-body`, media grid with lazy 160px thumbs and alt text, quiet edit link, preload block |
 | `src/driftnote/web/templates/base.html.j2` | Empty `head_extra` block in `<head>` |
-| `src/driftnote/web/templates/entry_edit.html.j2` | Preload block for the roman face |
+| `src/driftnote/web/templates/entry_edit.html.j2` | head_extra block left unfilled this phase; the preload joins in phase 5 with the preview serif |
 | `src/driftnote/web/templates/search.html.j2` | Input `aria-label`; result heading structure; em-dash kept |
 | `src/driftnote/web/routes_browse.py` | Static weekday name tuple, the `weekday` filter function, registration on the templates env |
 | `src/driftnote/web/static/style.css` | `--font-serif` token; four `@font-face` rules; `.entry-body`; media grid; back-link, video-radius, and quiet-button rules |
