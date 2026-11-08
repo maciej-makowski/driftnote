@@ -13,6 +13,7 @@ from sqlalchemy import Engine
 
 from driftnote.db import init_db, make_engine, session_scope
 from driftnote.repository.entries import EntryRecord, replace_tags, upsert_entry
+from driftnote.repository.media import MediaInput, replace_media
 from driftnote.web.routes_browse import install_browse_routes, install_static
 
 
@@ -282,6 +283,121 @@ def test_search_results_render_tag_chips_per_hit(
     assert 'class="tag-chip"' in r.text
     assert 'href="/?tag=work"' in r.text
     assert 'href="/?tag=cooking"' in r.text
+
+
+# Phase 4 (issue 63): reading experience. The entry page renders the
+# vendored serif behind .entry-body, a weekday heading, a back link, a
+# media grid, and preloads the roman face on the two pages that render it.
+
+
+def test_entry_page_heading_carries_weekday(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """The h1 names the weekday next to the ISO date: 2026-05-06 is a
+    Wednesday, resolved by the static weekday filter, not strftime."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/entry/2026-05-06")
+    assert r.status_code == 200
+    assert "<h1>Wednesday 2026-05-06" in r.text
+    # The markdown body renders inside the serif reading container.
+    assert '<div class="entry-body">' in r.text
+
+
+def test_entry_page_has_quiet_back_link(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """A quiet Calendar link sits above the h1, pointing at the calendar."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/entry/2026-05-06")
+    assert r.status_code == 200
+    assert '<p class="back"><a href="/">Calendar</a></p>' in r.text
+
+
+def test_entry_page_media_grid_marks_thumbs(tmp_path: Path) -> None:
+    """Photos render in a grid wrapper as lazy 160px thumbs with alt text;
+    videos stay outside the grid and keep preload=\"none\"."""
+    eng = make_engine(tmp_path / "media.sqlite")
+    init_db(eng)
+    with session_scope(eng) as session:
+        upsert_entry(
+            session,
+            EntryRecord(
+                date="2026-05-06",
+                mood="💪",
+                body_text="risotto night",
+                body_md="# Risotto night\n\nIt was great.",
+                created_at="t",
+                updated_at="t",
+            ),
+        )
+        replace_media(
+            session,
+            "2026-05-06",
+            [
+                MediaInput(kind="photo", filename="IMG_0001.heic"),
+                MediaInput(kind="video", filename="VID_0002.mov"),
+            ],
+        )
+    app = FastAPI()
+    install_browse_routes(app, engine=eng, iso_now=lambda: "2026-05-06T12:00:00Z")
+    install_static(app)
+    r = TestClient(app).get("/entry/2026-05-06")
+    assert r.status_code == 200
+    # The thumb links to the web-size copy and renders the thumb file,
+    # sized explicitly, lazily loaded, and named for its date.
+    assert '<a href="/media/2026-05-06/web/IMG_0001.jpg">' in r.text
+    assert 'src="/media/2026-05-06/thumb/IMG_0001.jpg"' in r.text
+    assert 'alt="photo from 2026-05-06"' in r.text
+    assert 'width="160" height="160" loading="lazy"' in r.text
+    # Photos live in the grid wrapper; videos stay document-flow.
+    assert '<div class="media-grid">' in r.text
+    assert 'preload="none"' in r.text
+
+
+_PRELOAD = (
+    '<link rel="preload" href="/static/fonts/newsreader-400.woff2"'
+    ' as="font" type="font/woff2" crossorigin>'
+)
+
+
+def test_entry_page_preloads_roman_font_only(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """The entry page preloads the roman face and nothing else: the italic
+    and latin-ext files are fetched on demand via unicode-range."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/entry/2026-05-06")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert _PRELOAD in head
+    assert "newsreader-400-italic" not in head
+    assert "latin-ext" not in head
+
+
+def test_calendar_page_fetches_no_font_file(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """Only the two serif pages preload anything: the calendar head carries
+    no preload links and no font references."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert 'rel="preload"' not in head
+    assert "newsreader" not in head
+
+
+def test_search_input_has_aria_label(app_with_data: tuple[FastAPI, Engine]) -> None:
+    """The search input names itself for screen readers; it has no visible
+    label element."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/search")
+    assert r.status_code == 200
+    assert 'aria-label="Search query"' in r.text
+
+
+def test_search_results_render_date_link_as_row_heading(
+    app_with_data: tuple[FastAPI, Engine],
+) -> None:
+    """Each hit's heading is the date+mood link; the em-dash separator
+    stays between the link and the excerpt."""
+    app, _ = app_with_data
+    r = TestClient(app).get("/search?q=risotto")
+    assert r.status_code == 200
+    assert '<h2 class="result-heading"><a href="/entry/2026-05-06">2026-05-06 💪</a></h2>' in r.text
+    assert "— risotto night" in r.text
 
 
 def test_base_chrome_skip_link_head_and_landmark(

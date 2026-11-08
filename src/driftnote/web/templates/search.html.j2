@@ -4,7 +4,7 @@
 {% block content %}
 <h1>Search</h1>
 <form method="get" action="/search" class="search-form">
-  <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" autofocus>
+  <input type="search" name="q" value="{{ q or '' }}" placeholder="quick brown fox" aria-label="Search query" autofocus>
   <button>Search</button>
 </form>
 {% if error %}
@@ -13,7 +13,8 @@
 <ul class="search-results">
   {% for e in results %}
     <li>
-      <a href="/entry/{{ e.date }}">{{ e.date }} {{ e.mood or "" }}</a> — {{ e.body_text|truncate(160) }}
+      <h2 class="result-heading"><a href="/entry/{{ e.date }}">{{ e.date }} {{ e.mood or "" }}</a></h2>
+      — {{ e.body_text|truncate(160) }}
       {% set entry_tags = tags_by_date.get(e.date, []) %}
       {% if entry_tags %}
         <span class="result-tags">{% for t in entry_tags %}{{ tag_chip(t) }}{% endfor %}</span>

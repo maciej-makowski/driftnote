@@ -64,6 +64,17 @@ def test_edit_form_renders(app: tuple[FastAPI, Engine, Path]) -> None:
     assert "initial body" in r.text
 
 
+def test_edit_page_defers_roman_preload(app: tuple[FastAPI, Engine, Path]) -> None:
+    """The edit page carries no preload this phase: nothing on it renders the
+    serif face yet (the preview gains the serif styling in phase 5, and the
+    preload joins then to avoid a preloaded-but-unused console warning)."""
+    fapp, _, _ = app
+    r = TestClient(fapp).get("/entry/2026-05-06/edit")
+    assert r.status_code == 200
+    head = r.text.partition("</head>")[0]
+    assert "newsreader-400.woff2" not in head
+
+
 def test_edit_post_updates_entry_md_and_db(app: tuple[FastAPI, Engine, Path]) -> None:
     fapp, eng, data_root = app
     r = TestClient(fapp, follow_redirects=False).post(

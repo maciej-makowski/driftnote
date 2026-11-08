@@ -1,23 +1,29 @@
 {% extends "base.html.j2" %}
 {% from "_macros.html.j2" import tag_chip %}
 {% block title %}{{ entry.date }} — Driftnote{% endblock %}
+{% block head_extra %}
+  <link rel="preload" href="/static/fonts/newsreader-400.woff2" as="font" type="font/woff2" crossorigin>
+{% endblock %}
 {% block content %}
 <article class="entry">
-  <h1>{{ entry.date }} {% if entry.mood %}<span class="mood">{{ entry.mood }}</span>{% endif %}</h1>
+  <p class="back"><a href="/">Calendar</a></p>
+  <h1>{{ entry.date|weekday }} {{ entry.date }} {% if entry.mood %}<span class="mood">{{ entry.mood }}</span>{% endif %}</h1>
   <p class="tags">{% for t in tags %}{{ tag_chip(t) }}{% endfor %}</p>
-  <div class="body">{{ body_html|safe }}</div>
+  <div class="entry-body">{{ body_html|safe }}</div>
   <section class="media">
-    {% for m in media if m.kind == "photo" %}
-      <a href="/media/{{ entry.date }}/web/{{ m.filename | replace('.heic', '.jpg') }}">
-        <img src="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.heic', '.jpg') }}" alt="">
-      </a>
-    {% endfor %}
+    <div class="media-grid">
+      {% for m in media if m.kind == "photo" %}
+        <a href="/media/{{ entry.date }}/web/{{ m.filename | replace('.heic', '.jpg') }}">
+          <img src="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.heic', '.jpg') }}" alt="photo from {{ entry.date }}" width="160" height="160" loading="lazy">
+        </a>
+      {% endfor %}
+    </div>
     {% for m in media if m.kind == "video" %}
       <video controls preload="none" poster="/media/{{ entry.date }}/thumb/{{ m.filename | replace('.', '_') }}.jpg">
         <source src="/media/{{ entry.date }}/original/{{ m.filename }}">
       </video>
     {% endfor %}
   </section>
-  <p><a href="/entry/{{ entry.date }}/edit">Edit</a></p>
+  <p class="entry-actions"><a href="/entry/{{ entry.date }}/edit">Edit</a></p>
 </article>
 {% endblock %}
